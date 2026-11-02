@@ -1,0 +1,35 @@
+# Machine-local configuration. Copy to config.toml (gitignored) and edit.
+# Precedence: command line > environment (BWX_*) > config.toml > built-in default.
+
+# Root for all experiment data: images/, work/, logs/.
+root = "/home/cxd/mpam-bw-experiment"
+
+# Dataset directory: must contain manifest.csv and replay-50/*.replay.json.
+dataset = "/home/cxd/data"
+
+# Firecracker binary and guest kernel (absolute paths; validated before launch).
+firecracker = "/var/lib/aenv/deps/firecracker/1.15.1-patch-v3/firecracker"
+kernel = "/var/lib/aenv/deps/kernel/vmlinux-6.1.175/vmlinux.bin"
+
+# resctrl mount point.
+resctrl = "/sys/fs/resctrl"
+
+# ddrc uncore PMU: bytes per counter increment (calibrated by `bwx calibrate`).
+ddrc_scale_bytes = 32
+
+# Optional: skip ddrc bandwidth collection entirely (e.g. non-Kunpeng hosts).
+bandwidth_enabled = true
+
+# Last resort when no resctrl control group can be created (the host's RMID pool
+# can leak permanently after rapid group create/destroy): apply caps to the root
+# group. Machine-wide effect on every tenant -- leave off unless you own the host.
+allow_root_group = false
+
+# VM defaults for replay.
+vcpus = 2
+mem_mib = 4096
+numa_node = 0
+
+# Per-action guest execution budget (0 = no per-case watchdog).
+case_timeout = 1800
+boot_timeout = 120

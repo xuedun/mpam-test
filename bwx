@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# bwx -- command line entry point for the MPAM bandwidth experiment toolkit.
+#
+# Usage: ./bwx <command> [options]     (try ./bwx --help)
+#
+# Everything is standard-library Python 3.9+; the only build step is the static
+# loopback/probe helpers, which the commands compile on demand.
+set -euo pipefail
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}"
+# e2fsprogs lives in /usr/sbin on many distributions and root's PATH may lack it.
+export PATH="$PATH:/usr/sbin:/sbin"
+exec python3 -B -m bwx "$@"
