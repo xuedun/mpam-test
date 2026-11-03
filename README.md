@@ -31,6 +31,209 @@ list        已转换 case 一览
 cleanup     清理遗留 resctrl 组与 scratch
 ```
 
+## 使用指南：按实验计划逐步执行
+
+下面按 EXPERIMENT-PLAN.md 的 Phase 0→4 展开每一步的具体命令、可调参数、
+以及**修改并发与 MPAM 参数**的方法。
+
+### 第 0 步：环境体检与平台标定
+
+```bash
+sudo ./bwx doctor                          # 必须先跑：15+ 项检查
+sudo ./bwx calibrate --node 2 --duration 4 # Phase 0 标定
+```
+
+`doctor` 检查（任一 FAIL 先修复再实验）：工具链 / sudo / KVM / firecracker 与
+kernel 路径（**错路径 = VM 起不来且 console 全空**）/ dataset / resctrl 挂载与
+MB 域 / ddrc PMU 可读 / **当前可建 resctrl 组数** / 各 node CPU / 磁盘。
+
+`calibrate` 参数：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--node N` | 第一个有 CPU 的 node | 标定发生的 NUMA node |
+| `--duration S` | 6 | 每个测量点秒数 |
+| `--repeats N` | 3 | 每点重复次数 |
+| `--threads N` | 8 | RMW 探针线程数（要超过档位上限才测得出 ceiling） |
+| `--buffer-mib N` | 256 | 每线程缓冲（必须大于 LLC slice，否则测的是缓存） |
+| `--levels LIST` | 由 gran 推导 | 要探测的档位 |
+| `--max-groups N` | 8 | ceiling 步骤最多建几个 resctrl 组（防 RMID 耗尽） |
+| `--skip-scale/-mapping/-snap/-ceiling` | - | 跳过对应测量 |
+
+产出 `calibration.json`：**level snap 表**（请求档→实际档的吸附映射，决定
+后面 sweep 能用的档位集合）、**ddrc scale**（应为 ~32 B/count）、**域↔node
+映射**、各档位 ceiling。
+
+### 第 1 步：转换镜像
+
+```bash
+sudo ./bwx convert --all                        # podman 里全部可转的 case
+sudo ./bwx convert --case tikv__pd-5480         # 指定 case（可重复）
+sudo ./bwx convert --case-file my-cases.txt     # 清单文件（# 注释）
+```
+
+参数：`--case ID`（可重复）/ `--case-file FILE` / `--all` /
+`--image <podman镜像ID>`（绕过 manifest）/ `--min-gib N`（镜像下限尺寸）。
+幂等，重跑自动跳过已转换的。转换细节见下文「转换是如何执行的」。
+
+### 第 2 步：单 VM 重放（Phase 1 的基本单元）
+
+```bash
+sudo ./bwx replay --case tikv__pd-5480 --numa-node 2
+sudo ./bwx replay --case tikv__pd-5480 --bandwidth 9 --numa-node 2     # 限 9% 带宽
+sudo ./bwx replay --case tikv__pd-5480 --bandwidth 54 --hard-limit     # 加 MBHDL 硬限
+sudo ./bwx replay --case aftership__clickhouse-sql-parser-128 --vcpus 4 --mem-mib 8192
+```
+
+**MPAM 参数（单次重放）**：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--bandwidth PCT` | 不限 | MB 档位 1..100。**0 一律拒绝**（会挂机）。内核会吸附到实际档（gran=9 时 50→54），记录里存 applied 值 |
+| `--group NAME` | bwx-replay-<pct> | resctrl 组名；组已存在则直接复用（**不会改它的配置**） |
+| `--hard-limit` | off | 同时写 MBHDL=1（仅内核支持时；本机未暴露） |
+
+**VM 规格/放置参数**：`--vcpus N`（默认 2）、`--mem-mib N`（4096）、
+`--numa-node N`（config）、`--cpu-list 0,2,4`（显式给 vcpus+1 个 CPU，必须都在
+所选 node 上，SMT 兄弟会被拒绝）。
+
+**行为参数**：`--case-timeout S`（1800，CASE_START 后的 guest 预算）、
+`--boot-timeout S`（120，启动阶段预算）、`--action-timeout S`（600，单步看门狗）、
+`--wait on/off`（off，on=重放轨迹 delay）、`--console off/markers/full`
+（markers）、`--bandwidth-interval S`（1，ddrc 采样间隔）、`--no-tools-disk`、
+`--keep-disks`、`--out DIR`。
+
+每条命令的输出判定：退出码 0 = completed/budget_exhausted；结果细节看
+`logs/replay/<stamp>/result.json`（含 `bandwidth.node2.peak_gbs/mean_gbs`）。
+
+### 第 3 步：敏感度扫描（Phase 1 主体——**并发与档位在这里调**）
+
+```bash
+# 基本：每 case × 每档位 × 每重复，1 个 VM 独占 node（本征敏感度）
+sudo ./bwx sweep --case-file my-cases.txt --nodes 2
+
+# 修改档位集合（默认由 calibrate 的 gran 推导；细粒度机器建议显式给全低区）
+sudo ./bwx sweep --case tikv__pd-5480 --levels 1,2,3,4,5,6,7,8,9,18,26,54,97
+
+# 修改并发：N 个同 case 副本共享同一个 MPAM 档位（"放大"模式）
+sudo ./bwx sweep --case tikv__pd-5480 --concurrency 8 --levels 9,26,54 --nodes 2
+
+# 重复次数（降噪，退化率取中位数）
+sudo ./bwx sweep --case-file my-cases.txt --repeats 3
+
+# 先看计划不执行
+sudo ./bwx sweep --case-file my-cases.txt --concurrency 4 --dry-run
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--concurrency N` | **1** | **并发修改点**：每格同时起 N 个 VM，共用一个 MPAM 组（每 VM 实得 ≈ 档位/N）。N>case 数时自动复制为 `<case>#k` 副本（独立 payload+rootfs 副本，交付盘共享只读）。N=1 测本征敏感度，N>1 测竞争敏感度——**别混在一个 sweep 里比** |
+| `--levels LIST` | gran 推导 | 档位集合；吸附后去重，只跑实际不同的档 |
+| `--repeats N` | 1 | 每格重复 |
+| `--nodes LIST` | 全部 node | 允许使用的 NUMA node（格子间轮转分配） |
+| `--stagger S` | 0 | 同格 N 个副本的启动间隔（秒）；0=同刻启动（配合不相交 CPU 分配） |
+| `--no-baseline` | off | 跳过 full 基线格（**不建议**：退化率需要分母） |
+| `--hard-limit` | off | 所有组加 MBHDL |
+| `--wait` / 超时族 / `--out` | 同 replay | 透传给每个 VM |
+
+产出：`sweep.csv`（每 VM 一行：case/level/N/replica/actions_s/node/带宽列）、
+`sweep-summary.csv`（每 case×档位 中位数与退化率）。组按**档位复用**（整
+个 sweep 一档一组，防 RMID 耗尽），格子结束不删组。
+
+**档位语义提醒**：并发 N 下 VM 实得 ≈ applied/N（MB 是组级上限，内核按需求
+比例分）；分析 N* 时用 `--sweep` 传多次不同并发的输出目录。
+
+### 第 4 步：分析与需求建模（Phase 2）
+
+```bash
+./bwx analyze --sweep logs/sweep/<stamp> --emit-demand demand.json
+
+# 多个并发档的 N* 计算：--sweep 可重复传
+./bwx analyze --sweep logs/sweep/n1-stamp --sweep logs/sweep/n4-stamp \
+              --sweep logs/sweep/n8-stamp --emit-demand demand.json
+
+# 调分类口径
+./bwx analyze --sweep logs/sweep/<stamp> \
+              --tolerance 3 --hungry-threshold 20 --medium-threshold 5
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--tolerance PCT` | 5.0 | 退化率多少以内算"无损失"（决定拐点/knee） |
+| `--hungry-threshold PCT` | 15.0 | 最低档退化超过此值 → hungry |
+| `--medium-threshold PCT` | 3.0 | medium/light 的分界 |
+| `--emit-demand FILE` | - | 导出 `bwx alloc --demand` 需要的需求表 |
+| `--sweep DIR`（可重复） | - | sweep 输出目录或直接指 sweep.csv |
+| `--alloc DIR` | - | alloc 输出，做策略对比 |
+
+产出：`sensitivity.csv`（case×档位 退化率）、`case-classes.csv`（分类、knee、
+cliff、N*、demand_gbs、min_acceptable_level）。
+
+### 第 5 步：分配策略对比（Phase 3——**并发与 MPAM 分配都在这里调**）
+
+```bash
+# 预算 4 VM、shared/equal 用 54 档
+sudo ./bwx alloc --case tikv__pd-5480 --case moov-io__customers-275 \
+     --strategies none,shared,equal --concurrency 4 --cap 54 --nodes 2
+
+# 差异化分配（demand 策略）：总预算 200 = 平均每人 50，按需求加权
+sudo ./bwx alloc --mix mix.json --strategies demand,spread \
+     --demand demand.json --concurrency 4 --budget 200
+
+# 先看每个 VM 拿到什么组/档/node
+sudo ./bwx alloc ... --dry-run
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--concurrency N` | **4** | **并发修改点**：同时运行的 VM 数（mix 不足 N 时轮转复制补齐） |
+| `--cap PCT` | 54 | shared/equal 策略的统一档位 |
+| `--budget PCT_SUM` | 200 | **MPAM 总预算修改点**：demand 策略所有 VM 的档位之和（按各自 demand 加权分配后取整，钳到 1..100） |
+| `--strategies LIST` | none,shared,equal,demand | `none`=不限 / `shared`=全 VM 一个组一个档 / `equal`=每 VM 一个组同档 / `demand`=每 VM 独立组独立档（按 demand.json 的 min_acceptable_level 加权）/ `spread`=再叠加跨 node 分散 |
+| `--demand FILE` | - | demand 策略必填（analyze --emit-demand 产出） |
+| `--mix FILE` | --case 集合 | 混合负载定义：`{"名称":{"caseID":{"role":"hungry","weight":2}}}` |
+| `--repeats N` | 2 | 重复轮（策略顺序轮转消除冷启动偏差） |
+| `--nodes LIST` | 全部 | spread 用的 node 池 |
+| `--stagger S` / `--seed N` | 0 / 0 | 启动间隔 / 计划洗牌种子 |
+| `--hard-limit` | off | 全部组加 MBHDL |
+
+产出：`alloc.csv`（每 VM：策略/组/档/node/actions_s）、`alloc-summary.csv`
+（每策略 mean/median actions、makespan、与 none 的配对差）。
+
+### 第 6 步：结论（Phase 4）
+
+```bash
+./bwx analyze --alloc logs/alloc/<stamp>
+```
+
+看 `alloc-summary.csv`：demand 是否在 makespan/吞吐上赢过 shared/equal，
+退化分布是否更公平（配对剔除未完成批次的 VM，避免崩溃美化某策略）。
+
+### 修改 MPAM 参数的三个层级汇总
+
+| 想改什么 | 在哪改 | 示例 |
+|---|---|---|
+| 单次重放的档位 | `bwx replay --bandwidth` | `--bandwidth 26` |
+| 扫描的档位集合 | `bwx sweep --levels` | `--levels 1,2,...,9,18,26,54,97` |
+| 每档硬限 | 任何命令 `--hard-limit` | 内核须暴露 MBHDL |
+| 统一分配档位 | `bwx alloc --cap` | `--cap 54` |
+| 差异化总预算 | `bwx alloc --budget` | `--budget 300`（5 VM 均值 60） |
+| 组名（复用已存在的组） | `replay --group` / sweep 自动按档位命名 | 组存在时**原样复用不改配置** |
+| 全机兜底（组耗尽时） | config.toml `allow_root_group = true` | 会作用于所有租户，记录 adopted_root |
+| 0 档 | **任何途径都改不了** | 硬校验拒绝（曾挂机） |
+
+### 修改并发的三个层级汇总
+
+| 想改什么 | 在哪改 | 语义 |
+|---|---|---|
+| 单格同 case 复本数 | `sweep --concurrency N` | N 个 VM **共享一个组**，测竞争放大（实得 ≈ 档位/N） |
+| 批次总 VM 数 | `alloc --concurrency N` | 异构 mix，策略决定组的分配 |
+| VM 自身 vCPU | `replay/sweep/alloc --vcpus` + `--mem-mib` | 每 VM 诉求（占用 vcpus+1 个 host CPU） |
+
+上限提醒：每 VM 需要 `vcpus+1` 个**物理核**（SMT 感知分配），node0/1 各 10 核
+只能 3 VM，node2/3 各 35+ 核可以 11-12 VM；allocator 会在放不下时报错而不是
+超卖。
+
 ## 转换是如何执行的（`bwx convert`）
 
 **输入**：dataset 里的 `manifest.csv`（case→镜像 tag 映射）+ root podman 存储
@@ -193,25 +396,15 @@ MPAM 成员校验、带宽窗口统计）、`guest/result/`（summary.json、eve
 转发/轮询延迟影响），是主指标；`vmm_wall_s` 是 host 墙钟（含 boot/关机），只用于
 整轮记账。带宽统计只积分 [CASE_START, CASE_DONE] 窗口，排除 boot/collect 噪声。
 
-## 实验流程（对应 EXPERIMENT-PLAN.md 的 Phase）
+## 实验流程速查（详见上文「使用指南」）
 
 ```bash
-# Phase 0 标定（每台机器一次）
-sudo ./bwx calibrate --node 2            # ddrc scale、域映射、档位吸附表、上限
-
-# Phase 1 敏感度画像（每 case × 每档位 × 重复；--concurrency N 做并发放大）
-sudo ./bwx sweep --case-file cases.txt --concurrency 1 --nodes 2
-
-# Phase 2 建模：分类 + 拐点 + N* + 导出 demand 表
-./bwx analyze --sweep logs/sweep/<stamp> --emit-demand demand.json
-
-# Phase 3 策略对比（none=不限 / shared=同组 / equal=同档各组 /
-#   demand=按需求加权 / spread=跨 node 分散）
+sudo ./bwx calibrate --node 2                                          # Phase 0
+sudo ./bwx sweep --case-file cases.txt --nodes 2                       # Phase 1
+./bwx analyze --sweep logs/sweep/<stamp> --emit-demand demand.json     # Phase 2
 sudo ./bwx alloc --case A --case B --strategies none,shared,equal,demand \
-     --demand demand.json --concurrency 4
-
-# Phase 4 结论
-./bwx analyze --alloc logs/alloc/<stamp>
+     --demand demand.json --concurrency 4                              # Phase 3
+./bwx analyze --alloc logs/alloc/<stamp>                              # Phase 4
 ```
 
 ## 平台事实（本机实测，doctor/calibrate 每机重测）
