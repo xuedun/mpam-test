@@ -2,9 +2,9 @@
 
 Why this exists
 ---------------
-This host exposes **no** `info/MB_MON`, so resctrl cannot report per-group
-bandwidth at all (its only monitor feature is `llc_occupancy`, and `num_rmids=1`).
-The only way to observe real DRAM traffic is the uncore PMU:
+Guest-side self-reported bandwidth is untrustworthy for a host-level study, so
+real DRAM traffic is observed through the uncore PMU (resctrl monitoring is not
+used at all):
 
     hisi_sccl<N>_ddrc<M>/flux_rd/   and   /flux_wr/
 

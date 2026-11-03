@@ -24,8 +24,7 @@ from . import cases as cases_mod
 from . import payload as payload_mod
 from . import serialio
 from . import vm as vm_mod
-from .mpam import Group, Platform
-from .placement import Allocator, Placement
+from .placement import Allocator, Placement  # noqa: F401
 from .util import (Error, append_jsonl, srun, utc_stamp, write_csv, write_json)
 
 
@@ -38,15 +37,9 @@ class RunContext:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.label = label
         self.started = time.time()
-        self.platform = None
         self.topology = None
         self.loopback = None
         self.tools_disk = None
-
-    def require_resctrl(self):
-        if self.platform is None:
-            self.platform = Platform(self.config.resctrl)
-        return self.platform
 
     def require_bandwidth(self):
         """Topology + compiled helper; None when bandwidth is disabled."""
@@ -95,8 +88,6 @@ class RunContext:
         """Record the host state this batch ran under."""
         doc = {'label': self.label, 'started_utc': utc_stamp(self.started),
                'config': _config_summary(self.config)}
-        if self.platform is not None:
-            doc['resctrl'] = self.platform.as_dict()
         if self.topology is not None:
             doc['bandwidth_topology'] = self.topology.as_dict()
         else:
@@ -121,19 +112,7 @@ def snapshot_args(args):
     return out
 
 
-def make_group(context, name, levels, *, hard_limit=False):
-    """Create (or adopt) an MPAM group and return it, applied caps read back."""
-    platform = context.require_resctrl()
-    group = Group(platform, name, levels, hard_limit=hard_limit,
-                  output_dir=context.out_dir)
-    group.create(allow_root=context.config.allow_root_group)
-    if group.adopted_root:
-        print('warning: no resctrl control group could be created; the cap was '
-              'applied to the ROOT group (machine-wide). recorded as adopted_root.')
-    return group
-
-
-def run_one(context, case, *, placement, mpam_group=None, out_dir=None,
+def run_one(context, case, *, placement, out_dir=None,
             console_mode=None, console_verify=None, wait='off',
             case_timeout=None, boot_timeout=None, action_timeout=600,
             label=None, keep_work=True, keep_disks=False):
@@ -150,7 +129,7 @@ def run_one(context, case, *, placement, mpam_group=None, out_dir=None,
         config, instance_id=case.instance_id, steps=case.steps, workdir=case.workdir,
         placement=placement, console_mode=console_mode, console_verify=console_verify,
         wait=wait, case_timeout=case_timeout, boot_timeout=boot_timeout,
-        action_timeout=action_timeout, mpam_group=mpam_group, work_root=target_root,
+        action_timeout=action_timeout, work_root=target_root,
         loopback_binary=None if context.tools_disk else context.require_loopback(),
         tools_disk=context.tools_disk, label=label, keep_disks=keep_disks)
     run.prepare(case.base)
@@ -169,10 +148,6 @@ def run_one(context, case, *, placement, mpam_group=None, out_dir=None,
         'vm_dir': str(run.target),
         't_launch_wall': wall_launch, 't_end_wall': wall_end,
     })
-    if mpam_group is not None:
-        record['mpam'] = mpam_group.as_dict()
-        record['bandwidth_requested'] = mpam_group.snap()
-
     record['_poll_count'] = getattr(run, '_poll_count', 0)
     record['_membership_debug'] = getattr(run, '_membership_debug', None)
     record['_last_collect'] = getattr(run, '_last_collect', None)
@@ -234,51 +209,3 @@ def _active_window(record, epoch):
     return (max(0.0, start), finish)
 
 
-class GroupPool:
-    """Owns the resctrl groups a command created, so cleanup cannot be forgotten.
-
-    Groups are **created once per distinct cap and reused**, never per run. This is
-    a hard platform constraint, not an optimisation: creating and removing a group
-    allocates and frees a monitoring ID, and on this host `num_rmids=1` with
-    `4 pmg` -- a rapid create/destroy cycle (measured: a 100-level probe loop)
-    exhausts the pool, after which the kernel refuses *every* further `mkdir` with
-    ENOSPC ("Out of RMIDs") and it did not recover within 60 s. So the number of
-    distinct caps in a whole experiment must stay small, and groups live until the
-    command finishes.
-    """
-
-    def __init__(self, context, prefix):
-        self.context = context
-        self.prefix = prefix
-        self.groups = []
-        self._by_key = {}
-
-    def acquire(self, levels, *, hard_limit=False, hint=''):
-        """Return the group for this exact cap, creating it only on first use."""
-        if isinstance(levels, int):
-            key = (('all', levels), hard_limit)
-            name = '%s-lvl%d%s' % (self.prefix, levels, '-h' if hard_limit else '')
-        else:
-            key = (tuple(sorted((int(k), int(v)) for k, v in levels.items())), hard_limit)
-            name = '%s-%s%s' % (self.prefix, '-'.join('d%sx%s' % kv for kv in key[0]),
-                                '-h' if hard_limit else '')
-        if key in self._by_key:
-            return self._by_key[key]
-        group = make_group(self.context, name, levels, hard_limit=hard_limit)
-        self._by_key[key] = group
-        self.groups.append(group)
-        return group
-
-    @property
-    def created_count(self):
-        return sum(1 for group in self.groups if group.created)
-
-    def release(self):
-        """Remove the groups we created. Never touches pre-existing ones."""
-        errors = []
-        for group in self.groups:
-            if group.created:
-                errors.extend(group.remove())
-        self.groups = []
-        self._by_key = {}
-        return errors

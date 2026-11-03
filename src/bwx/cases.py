@@ -157,6 +157,20 @@ def _dedupe(ids):
     return ordered
 
 
+def expand_cases(ids, count):
+    """Expand a case list to exactly `count` VM entries.
+
+    The contract for concurrent replay: fewer entries than concurrency are
+    replicated round-robin (same case runs in several VMs), more are truncated
+    to the first `concurrency` entries. Order is preserved and deterministic.
+    """
+    if not ids:
+        raise Error('no case given')
+    if count < 1:
+        raise Error('concurrency must be >= 1, got %d' % count)
+    return [ids[index % len(ids)] for index in range(count)]
+
+
 def select_cases(config, *, cases=None, case_file=None, all_converted=False,
                  language=None, require_image=True):
     """Resolve a case selection from CLI-style inputs, preserving order, deduped."""

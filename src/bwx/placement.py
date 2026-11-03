@@ -22,7 +22,7 @@ import os
 import re
 from pathlib import Path
 
-from .bandwidth import expand_cpulist, format_cpulist
+from .bandwidth import expand_cpulist, format_cpulist, node_cpulists
 from .util import Error, read_json, write_json
 
 _NODE_DIR = Path('/sys/devices/system/node')
@@ -251,6 +251,101 @@ class Allocator:
                 'pools': {str(n): {'total': len(p['cpus']), 'used': p['cursor'],
                                    'max_vms': p['max_vms']}
                           for n, p in self.pools.items()}}
+
+
+# ---------------------------------------------------------------- cpu pools
+def parse_cpu_list(text):
+    """'0,2,4-6' or '0 2 4' -> [0, 2, 4, 5, 6]. Order preserved, dups rejected."""
+    tokens = text.replace(',', ' ').split()
+    cpus = []
+    for token in tokens:
+        if '-' in token:
+            low, _, high = token.partition('-')
+            try:
+                cpus.extend(range(int(low), int(high) + 1))
+            except ValueError:
+                raise Error('bad cpu range: %r' % token)
+        else:
+            try:
+                cpus.append(int(token))
+            except ValueError:
+                raise Error('bad cpu number: %r' % token)
+    if not cpus:
+        raise Error('empty cpu list')
+    if len(cpus) != len(set(cpus)):
+        raise Error('duplicate cpus in list: %s' % cpus)
+    return cpus
+
+
+def read_cpu_pool(source):
+    """A cpu-list file: text (commas/spaces/newlines, a-b ranges) or JSON array.
+
+    JSON is accepted both as a bare array and as {"cpus": [...]}.
+    """
+    import json
+    path = Path(source)
+    if not path.is_file():
+        raise Error('cpu list file not found: %s' % path)
+    text = path.read_text(encoding='utf-8-sig')
+    stripped = text.lstrip()
+    if path.suffix.lower() == '.json' or stripped.startswith(('{', '[')):
+        doc = json.loads(text)
+        if isinstance(doc, dict):
+            doc = doc.get('cpus')
+        if not isinstance(doc, list) or any(not isinstance(c, int) for c in doc):
+            raise Error('%s: expected a JSON array of cpu numbers' % path)
+        if not doc:
+            raise Error('%s: empty cpu array' % path)
+        if len(doc) != len(set(doc)):
+            raise Error('%s: duplicate cpus' % path)
+        return list(doc)
+    # Text: allow the list to span lines.
+    return parse_cpu_list(text)
+
+
+def placements_from_pool(cpus, node, vcpus, count, *, helper_mode='dedicated'):
+    """Split a cpu pool into `count` disjoint placements, in pool order.
+
+    Each VM consumes vcpus+1 cpus (the last one is the Firecracker helper
+    thread). The pool must be large enough and every cpu must belong to `node`.
+    """
+    per_vm = vcpus + 1
+    needed = per_vm * count
+    if len(cpus) < needed:
+        raise Error('cpu pool too small: %d cpu(s), need %d (%d VMs x %d)'
+                    % (len(cpus), needed, count, per_vm))
+    node_set = set(node_cpus(node))
+    stray = [c for c in cpus if c not in node_set]
+    if stray:
+        raise Error('cpus %s are not on node %d' % (stray[:8], node))
+    placements = [Placement(node, cpus[i * per_vm:(i + 1) * per_vm],
+                            helper_mode=helper_mode)
+                  for i in range(count)]
+    Allocator.validate(placements)
+    return placements
+
+
+def placements_from_start_step(start, step, node, vcpus, count, *,
+                               helper_mode='dedicated'):
+    """Generate cpu slots as start + i*step (auto-inference mode).
+
+    step=vcpus+1 gives compact blocks; step>1 can skip SMT siblings. The
+    generated cpus are validated for node membership and disjointness exactly
+    like an explicit pool.
+    """
+    if step < 1:
+        raise Error('--cpu-step must be >= 1')
+    needed = (vcpus + 1) * count
+    cpus = [start + i * step for i in range(needed)]
+    return placements_from_pool(cpus, node, vcpus, count, helper_mode=helper_mode)
+
+
+def node_of_cpu(cpu):
+    """Which NUMA node a cpu belongs to (None when it is offline/unknown)."""
+    for node, cpus in node_cpulists().items():
+        if int(cpu) in cpus:
+            return node
+    return None
 
 
 def plan_from_json(path):

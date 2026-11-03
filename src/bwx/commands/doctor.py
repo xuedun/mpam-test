@@ -17,7 +17,7 @@ from .. import config as config_mod
 from ..util import Error, run, srun, sudo_prefix
 
 COMMAND = 'doctor'
-HELP = 'check host prerequisites (tools, KVM, resctrl, ddrc PMU, dataset)'
+HELP = 'check host prerequisites (tools, KVM, ddrc PMU, dataset)'
 
 TOOLS = ('podman', 'mkfs.ext4', 'e2fsck', 'debugfs', 'numactl', 'tar', 'du',
          'find', 'sha256sum', 'cksum', 'perf', 'awk', 'sed')
@@ -34,8 +34,7 @@ def run(args):
               'checks': []}
 
     def check(name, ok, detail='', *, warn=False):
-        # `warn` records a fact that shapes the experiment but is not a defect
-        # (e.g. no MB_MON: per-group bandwidth simply has to come from the PMU).
+        # `warn` records a fact that shapes the experiment but is not a defect.
         report['checks'].append({'name': name, 'ok': bool(ok),
                                  'warn': bool(warn), 'detail': detail})
         return ok
@@ -76,42 +75,6 @@ def run(args):
         rows = _count_manifest(manifest)
         traces = len(list(dataset.glob('*/*.replay.json'))) + len(list(dataset.glob('*.replay.json')))
         check('dataset_cases', rows > 0, '%d manifest rows, %d trajectory files' % (rows, traces))
-
-    # -- resctrl / MPAM ------------------------------------------------------
-    resctrl = Path(config.resctrl)
-    mounted = (resctrl / 'schemata').is_file()
-    check('resctrl_mounted', mounted, str(resctrl))
-    if mounted:
-        try:
-            from ..mpam import Platform
-            plat = Platform(resctrl)
-            check('mpam_mb', bool(plat.domains),
-                  'domains=%s gran=%d min=%d closids=%d mbhdl=%s'
-                  % (plat.domains, plat.granularity, plat.min_bandwidth,
-                     plat.num_closids, plat.has_mbhdl))
-            # Group capacity is a real constraint on MPAM hosts with a tiny
-            # monitoring pool: num_closids may say 32 while num_rmids=1 means a
-            # handful of groups, and exhausting it needs a resctrl remount.
-            capacity = plat.group_capacity(limit=4)
-            pool = plat.monitoring_pool()
-            check('mpam_group_capacity', capacity >= 1, warn=capacity < 4,
-                  detail='can create %d group(s) right now; num_rmids=%s existing=%d. '
-                         '%s' % (capacity, pool['num_rmids'], pool['existing_groups'],
-                                 'OK' if capacity >= 4 else
-                                 'Group creation is scarce here: reuse one group per '
-                                 'distinct cap (GroupPool does this automatically). '
-                                 'If this is 0, a previous run leaked groups or '
-                                 'exhausted the pool -- run `bwx cleanup --groups '
-                                 '--force`, and if that does not help the resctrl '
-                                 'mount needs remounting (host-level action).'))
-            check('mpam_monitoring', plat.has_mb_monitoring, warn=True,
-                  detail='MB_MON %s; L3_MON features=%s num_rmids=%s'
-                  % ('present' if plat.has_mb_monitoring else 'ABSENT (per-group '
-                     'bandwidth cannot be read from resctrl; ddrc PMU is the only '
-                     'ground truth)', ','.join(plat.monitor_features) or '-',
-                     _read(resctrl / 'info/L3_MON/num_rmids', '?')))
-        except Error as exc:
-            check('mpam_mb', False, str(exc))
 
     # -- ddrc PMU ------------------------------------------------------------
     topo = bw.BandwidthTopology(scale_bytes=config.ddrc_scale_bytes)

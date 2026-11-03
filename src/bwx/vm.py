@@ -43,7 +43,6 @@ from pathlib import Path
 
 from . import payload as payload_mod
 from . import serialio
-from .mpam import Group
 from .placement import Placement  # noqa: F401 - re-exported for callers
 from .util import (Error, copy_sparse, read_json, run, sha256_file, srun,
                    write_json)
@@ -107,10 +106,9 @@ class VmRun:
     def __init__(self, config, *, instance_id, steps, workdir, placement,
                  console_mode='markers', console_verify=True, wait='off',
                  case_timeout=1800, boot_timeout=120, action_timeout=600,
-                 mpam_group=None, work_root=None, boot_args_extra='',
-                 sample_interval=0.2, membership_interval=1.0,
-                 loopback_binary=None, tools_disk=None, label=None,
-                 keep_disks=False):
+                 work_root=None, boot_args_extra='',
+                 sample_interval=0.2, loopback_binary=None, tools_disk=None,
+                 label=None, keep_disks=False):
         self.config = config
         self.instance_id = instance_id
         self.steps = steps
@@ -122,12 +120,11 @@ class VmRun:
         self.case_timeout = float(case_timeout)
         self.boot_timeout = float(boot_timeout)
         self.action_timeout = float(action_timeout)
-        self.mpam_group = mpam_group
         self.sample_interval = float(sample_interval)
-        self.membership_interval = float(membership_interval)
-        self.membership_abandon_s = 10.0
         self.boot_args_extra = boot_args_extra
-        self._last_membership = 0.0
+        # Filler-mode cancellation: set from another thread to stop this VM
+        # (SIGKILL to the VMM's process group) at the next observe poll.
+        self._cancel = threading.Event()
         # rootfs.ext4 / payload.ext4 are scratch: results are extracted from the
         # payload disk after exit, so the images themselves are disposable. A
         # converted rootfs copy costs ~1-4 GiB per run; keeping them by default
@@ -187,7 +184,6 @@ class VmRun:
                    {'firecracker': vm_config, 'boot_args': boot_args,
                     'token': self.token, 'instance_id': self.instance_id,
                     'placement': self.placement.as_dict(),
-                    'mpam': self.mpam_group.as_dict() if self.mpam_group else None,
                     'console_mode': self.console_mode,
                     'console_verify': self.console_verify,
                     'wait': self.wait, 'case_timeout': self.case_timeout,
@@ -198,13 +194,10 @@ class VmRun:
 
     def launch_command(self):
         """argv for the VMM, wrapped in numactl and (optionally) the MPAM join."""
-        command = ['numactl', '--physcpubind=%s' % self.placement.physcpubind,
-                   '--membind=%d' % self.placement.node,
-                   str(self.config.firecracker), '--no-api', '--id', self.token,
-                   '--config-file', str(self.target / 'vm-config.json')]
-        if self.mpam_group is not None:
-            return self.mpam_group.join_argv(command)
-        return command
+        return ['numactl', '--physcpubind=%s' % self.placement.physcpubind,
+                '--membind=%d' % self.placement.node,
+                str(self.config.firecracker), '--no-api', '--id', self.token,
+                '--config-file', str(self.target / 'vm-config.json')]
 
     # ------------------------------------------------------------------ launch
     def run(self):
@@ -217,7 +210,7 @@ class VmRun:
         filter_ = serialio.ConsoleFilter(self.token,
                                          keep_full_lines=self.console_mode == 'full')
         usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
-        pins, samples, members = {}, [], []
+        pins, samples = {}, []
 
         launch = time.monotonic()
         host_times = {}
@@ -236,8 +229,7 @@ class VmRun:
                 writer_thread = threading.Thread(
                     target=self._pump_console, args=(filter_, host_times), daemon=True)
                 writer_thread.start()
-            self._observe(filter_, pins, samples, launch, result, host_times,
-                          members)
+            self._observe(filter_, pins, samples, launch, result, host_times)
             if writer_thread is not None:
                 writer_thread.join(timeout=5)
         finally:
@@ -261,12 +253,9 @@ class VmRun:
             'memory_policy': next((s.get('memory_policy') for s in reversed(samples)
                                    if s.get('memory_policy')), None),
             'guest_ram_samples': sum(1 for s in samples if s.get('guest_ram_nodes')),
-            'mpam_membership': _membership_summary(members),
             'console': filter_.stats(),
             'samples': len(samples),
         })
-        if self.mpam_group is not None:
-            result.fields['mpam'] = self.mpam_group.as_dict()
 
         # Extract the authoritative on-disk summary from the payload disk.
         extracted = payload_mod.extract_results(self.payload_disk, self.target / 'guest')
@@ -291,10 +280,23 @@ class VmRun:
         result.fields['verification'] = verification.as_dict()
         result.fields['markers'] = serialio.marker_table(filter_)
 
+        # A cancelled filler VM is not a failure: it is load that was withdrawn
+        # on purpose when the last real VM finished.
+        if self._cancel.is_set():
+            result.fields['status'] = 'cancelled'
+            result.fields['verified_status'] = 'cancelled'
+            result.fields['verification'] = {'ok': None, 'status': 'cancelled',
+                                             'detail': 'killed as filler load',
+                                             'checks': {}}
+            result.status = 'cancelled'
+            self._finalize_console(captured, filter_)
+            self._write_result(result)
+            self._remove_scratch_disks()
+            return result
+
         # Placement failures outrank a good guest result: the measurement would
-        # not reflect the intended NUMA/MPAM configuration.
+        # not reflect the intended NUMA configuration.
         status = verification.status
-        membership = result.fields.get('mpam_membership') or {}
         if verification.ok and not (result.fields['vcpu_pinning_verified']
                                     and result.fields['guest_ram_numa_verified']):
             status = 'placement_failed'
@@ -303,16 +305,6 @@ class VmRun:
             verification.detail = 'vcpu_pinning=%s guest_ram_numa=%s' % (
                 result.fields['vcpu_pinning_verified'],
                 result.fields['guest_ram_numa_verified'])
-        elif verification.ok and membership.get('verified') is False:
-            # The cap was not in force for every thread, so this run says nothing
-            # about the level it claims to measure.
-            status = 'mpam_membership_failed'
-            verification.ok = False
-            verification.status = status
-            verification.detail = 'threads outside group: %s of %s samples' % (
-                membership.get('leaked'), membership.get('sampled'))
-        verification.checks['mpam_membership_verified'] = membership.get('verified') \
-            if self.mpam_group is not None else None
         result.fields['verified_status'] = status
         result.status = status
 
@@ -364,18 +356,17 @@ class VmRun:
                     time.sleep(self.sample_interval)
             filter_.close()
 
-    def _observe(self, filter_, pins, samples, launch, result, host_times, members):
+    def _observe(self, filter_, pins, samples, launch, result, host_times):
         """Poll the VMM: pin threads, sample /proc, enforce host-side timeouts."""
         boot_deadline = launch + self.boot_timeout
         case_deadline = None
         while self.process.poll() is None:
+            if self._cancel.is_set():
+                self._kill('cancelled')
+                result.fields['forced_reason'] = 'cancelled'
+                break
             now = time.monotonic()
             self._pin_threads(pins)
-            # Membership evidence: once all vCPU threads are pinned the thread set
-            # is stable, so one read at that moment is the meaningful sample.
-            if self._vcpu_pinned(pins) and not members:
-                self._sample_membership(members, now)
-            self._collect_membership(members, now)
             samples.append(self._sample(now - launch))
             self._poll_count = getattr(self, '_poll_count', 0) + 1
             if 'CASE_START' in host_times and case_deadline is None:
@@ -393,110 +384,9 @@ class VmRun:
                 break
             time.sleep(self.sample_interval)
         self._pin_threads(pins)
-        # Final membership collection. The VM is gone, so waiting for an in-flight
-        # read costs only wall time. A degraded resctrl has been measured at 6-10 s
-        # per tasks read (healthy hosts: sub-millisecond), so the join is generous
-        # and bounded, and only runs when a group was active.
-        thread = getattr(self, '_membership_thread', None)
-        if thread is not None:
-            thread.join(timeout=15.0)
-        self._collect_membership(members, time.monotonic())
-        self._membership_debug = {'thread': thread is not None,
-                                  'alive': thread.is_alive() if thread else None,
-                                  'reader': getattr(self, '_membership_reader', None),
-                                  'collected': len(members)}
         # Record boot latency: launch -> first CASE_START seen on the host.
         if 'CASE_START' in host_times:
             result.fields['boot_ready_s'] = round(host_times['CASE_START'] - launch, 3)
-
-    def _sample_membership(self, members, now=None):
-        """Record whether every live VMM thread is inside the intended MPAM group.
-
-        A cap that is not applied to the vCPU threads measures nothing, so this is
-        the evidence that the cap under test was actually in force.
-
-        Sampling is racy by construction: firecracker creates its vCPU threads
-        after launch, and threads die while /proc entries linger. resctrl
-        membership is inherited at clone time, so a thread is a member from the
-        instant it exists -- but a snapshot of `tasks` taken *before* the /proc
-        scan cannot contain threads born in between. So: snapshot first (a thread
-        that dies mid-sample still counts as a member), and on any mismatch take a
-        second snapshot before declaring a leak. Only a mismatch that survives both
-        reads is real.
-
-        Budget: reading `tasks` is a resctrl partid-state walk, which this
-        platform's driver has been observed to take 6-9 s per read once its
-        monitoring pool degraded (sub-millisecond when healthy). A slow read must
-        never stall the case watchdog, so membership is sampled at most every
-        `membership_interval` seconds.
-        """
-        if self.mpam_group is None or self.process is None:
-            return
-        now = now if now is not None else time.monotonic()
-        last = getattr(self, '_last_membership', None)
-        if last is not None and now - last < self.membership_interval:
-            self._collect_membership(members, now)
-            return
-        if getattr(self, '_membership_thread', None) is not None:
-            # A read is already in flight; collect it rather than orphan it.
-            self._collect_membership(members, now)
-            return
-        self._collect_membership(members, now)
-        self._last_membership = now
-        task_dir = Path('/proc') / str(self.process.pid) / 'task'
-        if not task_dir.is_dir():
-            return
-        # The tasks read runs in a daemon thread: it has taken 6-9 s per read on
-        # this platform's degraded resctrl, and blocking the watchdog loop for
-        # that long would silently disable every host-side timeout.
-        if getattr(self, '_membership_thread', None) is not None:
-            self._collect_membership(members, now)
-        reader = self._membership_reader = {'members': None, 'done': False}
-
-        def _read():
-            for attempt in (1, 2):
-                group_tids = self.mpam_group.members()
-                try:
-                    tids = {entry.name for entry in task_dir.iterdir()
-                            if (task_dir / entry.name).exists()}
-                except OSError:
-                    # The VMM died mid-read (its /proc entries vanish). The read
-                    # outlived the VM -- possible only on a resctrl slow enough
-                    # that the whole run fit inside one membership read.
-                    reader['error'] = 'vmm-exited-during-read'
-                    reader['done'] = True
-                    return
-                if not tids or tids <= group_tids:
-                    break
-            reader['members'] = {'tids': len(tids), 'in_group': len(tids & group_tids),
-                                 'attempt': attempt}
-            reader['done'] = True
-
-        import threading
-        self._membership_thread = threading.Thread(target=_read, daemon=True)
-        self._membership_thread.start()
-
-    def _collect_membership(self, members, now):
-        """Adopt a finished background read; drop one that is still running."""
-        thread = getattr(self, '_membership_thread', None)
-        reader = getattr(self, '_membership_reader', None)
-        if thread is None or reader is None:
-            return
-        if not reader['done']:
-            if now - self._last_membership > self.membership_abandon_s:
-                # Stuck read (degraded resctrl, measured 6-9 s per read):
-                # abandon it rather than wait. Generous by default so a slow host
-                # still yields evidence; the watchdog loop is never blocked either way.
-                self._membership_thread = None
-                self._membership_reader = None
-            return
-        thread.join(timeout=1)
-        if reader['members'] is not None:
-            members.append(reader['members'])
-        self._last_collect = {'done': reader['done'], 'members': reader['members'],
-                              'error': reader.get('error')}
-        self._membership_thread = None
-        self._membership_reader = None
 
     def _pin_threads(self, pins):
         """Pin fc_vcpu N -> its own CPU, everything else -> helper CPU."""
@@ -665,6 +555,14 @@ class VmRun:
             except ValueError:
                 pass
 
+    def cancel(self):
+        """Ask this VM to stop at the next observe poll (filler-mode kill)."""
+        self._cancel.set()
+
+    @property
+    def cancelled(self):
+        return self._cancel.is_set()
+
     def _kill(self, reason):
         if self.process is not None and self.process.poll() is None:
             try:
@@ -702,29 +600,6 @@ class VmRun:
         import shutil
         if self.target.is_dir():
             shutil.rmtree(self.target, ignore_errors=True)
-
-
-def _membership_summary(members):
-    """Aggregate the membership samples into one verdict.
-
-    Only steady-state samples decide the verdict: once the thread count reaches its
-    maximum (all vCPU threads exist), every subsequent sample must show full
-    membership. Transient 1-thread blips during spin-up -- a snapshot taken a
-    moment before resctrl's tasks file reflects an inherited membership -- are
-    counted but do not fail the run, because resctrl membership is inherited at
-    clone time and cannot genuinely be absent once the thread exists.
-    """
-    if not members:
-        return {'sampled': 0, 'verified': None,
-                'note': 'no membership sample completed; on a slow resctrl the '
-                        'tasks read can outlive a short VM (unknown, not a failure)'}
-    max_tids = max(m['tids'] for m in members)
-    steady = [m for m in members if m['tids'] == max_tids]
-    return {'sampled': len(members), 'max_tids': max_tids,
-            'steady_samples': len(steady),
-            'verified': bool(steady) and all(m['in_group'] == m['tids'] for m in steady),
-            'leaked': sum(m['tids'] - m['in_group'] for m in members),
-            'steady_leaked': sum(m['tids'] - m['in_group'] for m in steady)}
 
 
 def read_result(target):

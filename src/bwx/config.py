@@ -16,7 +16,6 @@ DEFAULTS = {
     'dataset': '/home/cxd/data',
     'firecracker': '/var/lib/aenv/deps/firecracker/1.15.1-patch-v3/firecracker',
     'kernel': '/var/lib/aenv/deps/kernel/vmlinux-6.1.175/vmlinux.bin',
-    'resctrl': '/sys/fs/resctrl',
     'ddrc_scale_bytes': 32,
     'bandwidth_enabled': True,
     'vcpus': 2,
@@ -26,11 +25,6 @@ DEFAULTS = {
     'boot_timeout': 120,
     'console': 'markers',       # off | markers | full
     'console_verify': True,
-    # Last-resort fallback when no resctrl control group can be created (this
-    # platform's RMID pool leaks on create/destroy cycles and even a remount does
-    # not recover): apply the cap to the ROOT group instead. Machine-wide effect,
-    # so it is opt-in and recorded in every result.
-    'allow_root_group': False,
 }
 
 _ENV_PREFIX = 'BWX_'
@@ -132,7 +126,7 @@ def load(explicit=None, overrides=None):
         source.setdefault('cli', []).append(key)
 
     values['root'] = Path(values['root']).expanduser().resolve()
-    for key in ('dataset', 'firecracker', 'kernel', 'resctrl'):
+    for key in ('dataset', 'firecracker', 'kernel'):
         values[key] = Path(values[key]).expanduser()
 
     if values['console'] not in ('off', 'markers', 'full'):
@@ -149,7 +143,6 @@ def add_arguments(parser):
                         help='dataset dir with manifest.csv and replay-50/')
     parser.add_argument('--firecracker', type=Path, metavar='PATH', help='Firecracker binary')
     parser.add_argument('--kernel', type=Path, metavar='PATH', help='guest kernel image')
-    parser.add_argument('--resctrl', type=Path, metavar='DIR', help='resctrl mount point')
     parser.add_argument('--console', choices=('off', 'markers', 'full'),
                         help='serial console capture: off (discard), markers '
                              '(keep protocol lines only, default), full (keep everything)')
