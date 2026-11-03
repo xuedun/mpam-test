@@ -171,18 +171,28 @@ cliff、N*、demand_gbs、min_acceptable_level）。
 
 ### 第 5 步：分配策略对比（Phase 3——**并发与 MPAM 分配都在这里调**）
 
-```bash
-# 预算 4 VM、shared/equal 用 54 档
-sudo ./bwx alloc --case tikv__pd-5480 --case moov-io__customers-275 \
-     --strategies none,shared,equal --concurrency 4 --cap 54 --nodes 2
+**case 清单从文件读**（不用一串 `--case`）：`--case-file` 接受 txt 或 json，
+模板见 `cases.example.txt` / `cases.example.json`（复制成 `cases.txt` /
+`cases.json`，已 gitignore）：
 
-# 差异化分配（demand 策略）：总预算 200 = 平均每人 50，按需求加权
-sudo ./bwx alloc --mix mix.json --strategies demand,spread \
+```bash
+# cases.txt：一行一个 instance_id（# 注释）
+sudo ./bwx alloc --case-file cases.txt --strategies none,shared,equal \
+     --concurrency 4 --cap 54 --nodes 2
+
+# cases.json：结构化 mix（role/weight 参与 demand 加权与结果标注）
+sudo ./bwx alloc --case-file cases.json --strategies demand,spread \
      --demand demand.json --concurrency 4 --budget 200
 
-# 先看每个 VM 拿到什么组/档/node
-sudo ./bwx alloc ... --dry-run
+# 先看每个 VM 拿到什么组/档/node（不启动 VM）
+sudo ./bwx alloc --case-file cases.txt --concurrency 8 --dry-run
 ```
+
+**清单 → 并发的展开规则**（`--concurrency N`）：
+
+- N **小于**清单条数：**截断取前 N 个**（tikv、moov、urql 三条 + N=2 → 只跑前两条）
+- N **大于**清单条数：**轮转复制补齐到 N 个 VM**（三条 + N=5 → tikv, moov, urql, tikv, moov；同 case 的多个 VM 各自独立 payload/rootfs，仍不相交分核）
+- 复制品在结果里标 `case` 字段同名、slot 不同，分析时按 slot 区分
 
 | 参数 | 默认 | 说明 |
 |---|---|---|

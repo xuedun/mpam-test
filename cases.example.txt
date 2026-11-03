@@ -1,0 +1,10 @@
+# Example case batch file for `bwx alloc --case-file` / `sweep --case-file` /
+# `convert --case-file`. One instance_id per line; '#' starts a comment.
+# Copy to cases.txt (gitignored) and edit.
+#
+# With --concurrency N:
+#   N < entries  -> the first N cases run (truncated)
+#   N > entries  -> cases are replicated round-robin to exactly N VMs
+tikv__pd-5480
+moov-io__customers-275
+formidablelabs__urql-410

@@ -2,6 +2,8 @@ cases/
 logs/
 work/
 config.toml
+cases.txt
+cases.json
 __pycache__/
 *.pyc
 *.o

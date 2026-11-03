@@ -32,6 +32,7 @@ from pathlib import Path
 
 from .. import bandwidth as bw
 from .. import cases as cases_mod
+from ..cases import _dedupe, parse_case_file
 from .. import config as config_mod
 from .. import driver
 from .. import placement as placement_mod
@@ -52,7 +53,12 @@ def add_arguments(parser):
                         help='comma-separated subset of %s' % ','.join(STRATEGIES))
     parser.add_argument('--case', action='append', default=[], metavar='ID',
                         help='case to include in the mix (repeatable)')
-    parser.add_argument('--case-file', type=Path, help='mix from a file')
+    parser.add_argument('--case-file', type=Path,
+                        help='cases from a file: .txt (one id per line, # comments) '
+                             'or .json (["id",...] / {"cases":[...]} / structured '
+                             'mixes {"mix":{"case":{"role","weight"}}}). With '
+                             '--concurrency N: N < entries -> first N; N > entries '
+                             '-> replicate round-robin to N VMs')
     parser.add_argument('--mix', type=Path, metavar='JSON',
                         help='explicit mix: {"name": {"case": {"role": "hungry|light", '
                              '"weight": 3}}}. Overrides --case/--case-file.')
@@ -179,34 +185,39 @@ def run(args):
 
 # ----------------------------------------------------------------- mix / demand
 def _mixes(args, config):
-    """{mix_name: [{case_id, role, weight}]}"""
+    """{mix_name: [{case_id, role, weight}]}
+
+    Sources, in priority order:
+    * --mix FILE: JSON object of named mixes (the full format)
+    * --case-file FILE: .txt (one id per line) or .json (array / {"cases": [...]}
+      for a plain default mix, or the same structured-mixes object as --mix)
+    * --case ID (repeatable)
+
+    Expansion to --concurrency happens later, in _allocate: fewer entries than
+    concurrency are replicated round-robin, more are truncated to the first
+    `concurrency` (see its docstring).
+    """
     if args.mix:
         doc = json.loads(Path(args.mix).read_text(encoding='utf-8-sig'))
-        mixes = {}
-        for name, entries in doc.items():
-            items = []
-            for case_id, meta in entries.items():
-                meta = meta or {}
-                items.append({'case_id': case_id, 'role': meta.get('role', 'mixed'),
-                              'weight': float(meta.get('weight', 1))})
-            mixes[name] = items
-        return mixes
+        from ..cases import _normalize_json_selection
+        parsed = _normalize_json_selection(doc, Path(args.mix))
+        if parsed['mixes'] is None:
+            # An array or {"cases": [...]}: one plain mix named "default".
+            return {'default': [{'case_id': iid, 'role': 'mixed', 'weight': 1.0}
+                                for iid in parsed['ids']]}
+        return parsed['mixes']
 
     ids = list(args.case)
     if args.case_file:
-        for line in Path(args.case_file).read_text(encoding='utf-8-sig').splitlines():
-            token = line.split('#', 1)[0].strip()
-            if token:
-                ids.append(token)
+        parsed = parse_case_file(args.case_file)
+        if parsed['mixes'] is not None:
+            return parsed['mixes']
+        ids.extend(parsed['ids'])
     if not ids:
-        raise Error('no mix given: pass --mix, --case or --case-file')
-    seen, ordered = set(), []
-    for iid in ids:
-        if iid not in seen:
-            seen.add(iid)
-            ordered.append(iid)
+        raise Error('no mix given: pass --mix, --case or --case-file '
+                    '(txt or json)')
     return {'default': [{'case_id': iid, 'role': 'mixed', 'weight': 1.0}
-                        for iid in ordered]}
+                        for iid in _dedupe(ids)]}
 
 
 def _demand(args):

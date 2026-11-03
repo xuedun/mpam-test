@@ -1,0 +1,20 @@
+// Example structured case mix (JSON) for `bwx alloc --case-file mix.json`
+// (or `--mix`). Copy to cases.json (gitignored) and edit.
+//
+// Top-level object: mix name -> { case_id -> {role, weight} }.
+//   role   : annotation used by analysis output (hungry/light/medium/...)
+//   weight : relative weight for the `demand` strategy (default 1)
+//
+// Plain forms are also accepted:
+//   ["id-a", "id-b"]                    one anonymous mix
+//   {"cases": ["id-a", "id-b"]}         same, more explicit
+{
+  "nightly": {
+    "tikv__pd-5480": { "role": "hungry", "weight": 3 },
+    "moov-io__customers-275": null,
+    "formidablelabs__urql-410": { "role": "light" }
+  },
+  "soak": {
+    "aftership__clickhouse-sql-parser-128": { "role": "medium", "weight": 2 }
+  }
+}

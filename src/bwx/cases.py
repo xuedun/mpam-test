@@ -79,6 +79,84 @@ def load_case(config, instance_id, *, require_image=True):
     return case
 
 
+def parse_case_file(path):
+    """Read a case selection file: .txt or .json, shared by every command.
+
+    Accepted formats:
+
+    * text: one instance_id per line, `#` starts a comment, blank lines skipped
+    * JSON array: ``["id-a", "id-b"]``
+    * JSON object with a list: ``{"cases": ["id-a", "id-b"]}``
+    * JSON object of mixes (consumed by ``alloc``): ``{"mix-name": {"id-a":
+      {"role": "hungry", "weight": 3}}}`` -- values may be null (role mixed,
+      weight 1)
+
+    Returns ``{'ids': [...], 'mixes': {name: [entries]} or None}``. Callers that
+    only need ids (convert/sweep/replay-listing) ignore ``mixes``; ``alloc``
+    uses ``mixes`` when present and builds a default mix from ``ids`` otherwise.
+    """
+    import json as _json
+
+    path = Path(path)
+    if not path.is_file():
+        raise Error('case file not found: %s' % path)
+    text = path.read_text(encoding='utf-8-sig')
+    if path.suffix.lower() == '.json' or text.lstrip().startswith(('{', '[')):
+        try:
+            doc = _json.loads(text)
+        except ValueError as exc:
+            raise Error('invalid JSON in %s: %s' % (path, exc))
+        return _normalize_json_selection(doc, path)
+
+    ids = []
+    for line in text.splitlines():
+        token = line.split('#', 1)[0].strip()
+        if token:
+            ids.append(token)
+    return {'ids': _dedupe(ids), 'mixes': None}
+
+
+def _normalize_json_selection(doc, path):
+    if isinstance(doc, list):
+        if any(not isinstance(item, str) or not item.strip() for item in doc):
+            raise Error('%s: JSON array must contain case id strings' % path)
+        return {'ids': _dedupe([item.strip() for item in doc]), 'mixes': None}
+    if isinstance(doc, dict):
+        if 'cases' in doc and isinstance(doc['cases'], list):
+            inner = doc['cases']
+            if any(not isinstance(item, str) or not item.strip() for item in inner):
+                raise Error('%s: "cases" must be a list of case id strings' % path)
+            return {'ids': _dedupe([item.strip() for item in inner]), 'mixes': None}
+        # Structured mixes: {mix: {case: {role, weight}}}
+        mixes, ids = {}, []
+        for mix_name, entries in doc.items():
+            if not isinstance(entries, dict):
+                raise Error('%s: mix %r must be an object of case entries' % (path, mix_name))
+            items = []
+            for case_id, meta in entries.items():
+                meta = meta if isinstance(meta, dict) else {}
+                try:
+                    weight = float(meta.get('weight', 1))
+                except (TypeError, ValueError):
+                    weight = 1.0
+                items.append({'case_id': str(case_id), 'role': str(meta.get('role', 'mixed')),
+                              'weight': weight})
+                ids.append(str(case_id))
+            mixes[str(mix_name)] = items
+        return {'ids': _dedupe(ids), 'mixes': mixes}
+    raise Error('%s: unsupported case-file JSON shape (use an array, {"cases": [...]}, '
+                'or {"mix": {"case": {...}}})' % path)
+
+
+def _dedupe(ids):
+    seen, ordered = set(), []
+    for iid in ids:
+        if iid not in seen:
+            seen.add(iid)
+            ordered.append(iid)
+    return ordered
+
+
 def select_cases(config, *, cases=None, case_file=None, all_converted=False,
                  language=None, require_image=True):
     """Resolve a case selection from CLI-style inputs, preserving order, deduped."""
@@ -86,10 +164,7 @@ def select_cases(config, *, cases=None, case_file=None, all_converted=False,
     if cases:
         ids.extend(c.strip() for c in cases.split(',') if c.strip())
     if case_file:
-        for line in Path(case_file).read_text(encoding='utf-8-sig').splitlines():
-            token = line.split('#', 1)[0].strip()
-            if token:
-                ids.append(token)
+        ids.extend(parse_case_file(case_file)['ids'])
     if all_converted:
         for workspace in sorted(config.cases_dir.glob('*')):
             record = workspace / 'base-image.json'

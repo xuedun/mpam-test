@@ -52,7 +52,9 @@ CSV_FIELDS = ['case', 'language', 'level_requested', 'level_applied', 'group',
 def add_arguments(parser):
     parser.add_argument('--case', action='append', default=[], metavar='ID',
                         help='instance_id (repeatable)')
-    parser.add_argument('--case-file', type=Path, help='one instance_id per line')
+    parser.add_argument('--case-file', type=Path,
+                        help='cases from a file: .txt (one id per line, # comments) '
+                             'or .json (["id", ...] / {"cases": [...]})')
     parser.add_argument('--all', action='store_true', help='every converted case')
     parser.add_argument('--levels', default='', metavar='LIST',
                         help='comma-separated requested MB levels. Default: derived '

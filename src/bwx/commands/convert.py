@@ -14,7 +14,9 @@ HELP = 'convert podman images into base ext4 rootfs images (idempotent)'
 def add_arguments(parser):
     parser.add_argument('--case', action='append', default=[], metavar='ID',
                         help='instance_id to convert (repeatable)')
-    parser.add_argument('--case-file', type=Path, help='one instance_id per line (# = comment)')
+    parser.add_argument('--case-file', type=Path,
+                        help='cases from a file: .txt (one id per line, # comments) '
+                             'or .json (["id", ...] / {"cases": [...]})')
     parser.add_argument('--all', action='store_true',
                         help='every manifest row whose image is in root podman storage')
     parser.add_argument('--image', action='append', default=[], metavar='ID',
@@ -24,12 +26,8 @@ def add_arguments(parser):
 
 
 def _case_ids_from_file(path):
-    ids = []
-    for line in Path(path).read_text(encoding='utf-8-sig').splitlines():
-        token = line.split('#', 1)[0].strip()
-        if token:
-            ids.append(token)
-    return ids
+    from ..cases import parse_case_file
+    return parse_case_file(path)['ids']
 
 
 def run(args):
