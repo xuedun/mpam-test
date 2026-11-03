@@ -58,7 +58,11 @@ JSON 载荷用 POSIX `cksum` CRC 保护。验证是强制的（可显式关闭�
 `command.json`（完整 argv）、`console-markers.log`/`console-failure.log`、
 `firecracker.log`、`metrics.jsonl`、`result.json`（含验证详情、放置校验、
 MPAM 成员校验、带宽窗口统计）、`guest/result/`（summary.json、events.jsonl、
-每步 actions/&lt;i&gt;.log、基线 patch、submitted.patch）。
+每步 actions/&lt;i&gt;.log、基线 patch、submitted.patch）、`payload/`（生成树）。
+
+**scratch 盘不保留**：`rootfs.ext4`/`payload.ext4`（单次 1-4 GiB）在结果抽取
+完成后自动删除（目录里只留 `disks-removed.txt` 标记），需要事后 debugfs 检查
+时加 `--keep-disks`。整个 VM 目录因此只有 ~1 MiB。
 
 计时口径：`actions_s`/`case_wall_s` 来自 guest 的 `date +%s%N`（不受 host 串口
 转发/轮询延迟影响），是主指标；`vmm_wall_s` 是 host 墙钟（含 boot/关机），只用于
