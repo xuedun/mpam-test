@@ -44,6 +44,10 @@ def add_arguments(parser):
                         help='keep the VM scratch dir (default: keep)')
     parser.add_argument('--discard-work', dest='keep_work', action='store_false',
                         help='delete the VM scratch dir afterwards')
+    parser.add_argument('--keep-disks', action='store_true',
+                        help='keep rootfs.ext4/payload.ext4 in the VM dir for '
+                             'post-mortem inspection (default: delete after result '
+                             'extraction; they cost 1-4 GiB per run)')
     parser.add_argument('--bandwidth-interval', type=float, default=1.0,
                         help='ddrc sampling interval seconds (default 1)')
 
@@ -89,7 +93,8 @@ def run(args):
                                 wait=args.wait, case_timeout=args.case_timeout,
                                 boot_timeout=args.boot_timeout,
                                 action_timeout=args.action_timeout,
-                                label=case.instance_id, keep_work=args.keep_work)
+                                label=case.instance_id, keep_work=args.keep_work,
+                                keep_disks=args.keep_disks)
         records.append(record)
     finally:
         if collector is not None:

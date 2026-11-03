@@ -109,7 +109,8 @@ class VmRun:
                  case_timeout=1800, boot_timeout=120, action_timeout=600,
                  mpam_group=None, work_root=None, boot_args_extra='',
                  sample_interval=0.2, membership_interval=1.0,
-                 loopback_binary=None, tools_disk=None, label=None):
+                 loopback_binary=None, tools_disk=None, label=None,
+                 keep_disks=False):
         self.config = config
         self.instance_id = instance_id
         self.steps = steps
@@ -127,6 +128,12 @@ class VmRun:
         self.membership_abandon_s = 10.0
         self.boot_args_extra = boot_args_extra
         self._last_membership = 0.0
+        # rootfs.ext4 / payload.ext4 are scratch: results are extracted from the
+        # payload disk after exit, so the images themselves are disposable. A
+        # converted rootfs copy costs ~1-4 GiB per run; keeping them by default
+        # would multiply storage by the number of runs for no diagnostic value.
+        # opt-in with keep_disks=True for post-mortem debugfs inspection.
+        self.keep_disks = keep_disks
         self.loopback_binary = loopback_binary
         self.tools_disk = tools_disk
         self.token = uuid.uuid4().hex[:16]
@@ -311,7 +318,27 @@ class VmRun:
 
         self._finalize_console(captured, filter_)
         self._write_result(result)
+        self._remove_scratch_disks()
         return result
+
+    def _remove_scratch_disks(self):
+        """Unlink the scratch disk images once their contents are consumed.
+
+        Order matters: this must run after extract_results() (the guest summary
+        comes off the payload disk) and after _finalize_console. Everything else
+        in the VM directory (config, console, guest results, payload tree) stays.
+        """
+        if self.keep_disks:
+            return
+        removed = []
+        for name in ('rootfs.ext4', 'payload.ext4'):
+            disk = self.target / name
+            if disk.is_file():
+                disk.unlink()
+                removed.append(name)
+        if removed:
+            (self.target / 'disks-removed.txt').write_text(
+                '\n'.join(removed) + '\n', encoding='utf-8')
 
     # ------------------------------------------------------------- internals
     def _pump_console(self, filter_, host_times):

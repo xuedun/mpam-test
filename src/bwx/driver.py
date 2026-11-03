@@ -136,7 +136,7 @@ def make_group(context, name, levels, *, hard_limit=False):
 def run_one(context, case, *, placement, mpam_group=None, out_dir=None,
             console_mode=None, console_verify=None, wait='off',
             case_timeout=None, boot_timeout=None, action_timeout=600,
-            label=None, keep_work=True):
+            label=None, keep_work=True, keep_disks=False):
     """Execute one VM run and return its record dict."""
     config = context.config
     console_mode = console_mode or config.console
@@ -152,7 +152,7 @@ def run_one(context, case, *, placement, mpam_group=None, out_dir=None,
         wait=wait, case_timeout=case_timeout, boot_timeout=boot_timeout,
         action_timeout=action_timeout, mpam_group=mpam_group, work_root=target_root,
         loopback_binary=None if context.tools_disk else context.require_loopback(),
-        tools_disk=context.tools_disk, label=label)
+        tools_disk=context.tools_disk, label=label, keep_disks=keep_disks)
     run.prepare(case.base)
 
     wall_launch = time.time()
