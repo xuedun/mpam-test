@@ -5,6 +5,9 @@
 root = "/home/cxd/mpam-bw-experiment"
 
 # Dataset directory: must contain manifest.csv and replay-50/*.replay.json.
+# The python runtime does NOT need to live here: the repository's own
+# runtime/python/ (vendored, ~261 MiB) is preferred automatically; this
+# dataset path is only used as a fallback for python-deps/.
 dataset = "/home/cxd/data"
 
 # Firecracker binary and guest kernel (absolute paths; validated before launch).

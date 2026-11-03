@@ -135,16 +135,19 @@ guest 侧执行链：内核 `init=/bwx/init.sh`（stub）→ 挂文件系统 →
 | `--keep-disks` | 保留 scratch 盘（默认抽取后删除） | 删 |
 | `--out DIR` | 输出目录 | logs/replay/<UTC时间戳> |
 
-**共享工具盘**（首次自动构建，缓存在 `work/tools/`）：从
-`<dataset>/python-deps/python-runtime/miniconda3` 裁剪 stdlib + ELF 依赖闭包 +
-私有 loader 启动（不触碰 guest libc；host 是 openEuler、镜像是 Ubuntu 22.04，混
-libc 必炸）。构建时自测 `import ssl/sqlite3/...`。guest 内 `command -v python3`
-失败才前置它进 PATH——**不遮蔽镜像自带解释器**。
+**共享工具盘**（首次自动构建，缓存在 `work/tools/`）：python 运行时优先取
+**仓库内的 `runtime/python/`**（261 MiB，conda 布局：bin + stdlib + .so 闭包，
+随 git 走，clone 即自包含），找不到再看 `<dataset>/python-deps/`。staging 时
+裁剪 stdlib + 收集 ELF 依赖闭包 + 私有 loader 启动（不触碰 guest libc；host 是
+openEuler、镜像是 Ubuntu 22.04，混 libc 必炸）。构建时自测
+`import ssl/sqlite3/...`。guest 内 `command -v python3` 失败才前置它进
+PATH——**不遮蔽镜像自带解释器**。
 
 ## 目录布局
 
 ```
 cases/<instance_id>/image.ext4     交付镜像（convert 产物，之后只读）
+runtime/python/                    仓库内置 python 运行时（工具盘的源，261 MiB）
 work/tools/                        共享只读工具盘 + loopback 编译缓存
 logs/<command>/<UTC时间戳>/        每次命令的输出（VM 目录、CSV、环境快照）
 src/bwx/                           库与命令；src/bwx/guest/ 是 guest 框架

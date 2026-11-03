@@ -36,8 +36,16 @@ GUEST_MOUNT = '/opt/bwx-tools'
 
 
 def find_python_runtime(config):
-    """Locate a relocatable python tree, if the dataset ships one."""
-    candidates = [Path(config.dataset) / 'python-deps' / 'python-runtime' / 'miniconda3',
+    """Locate a relocatable python tree.
+
+    Search order: the copy vendored into this repository (runtime/python, so a
+    fresh clone is self-contained), then the dataset's python-deps tree. Both are
+    conda layouts (bin/python3.14 + lib/python3.14 + lib/*.so*); the staged tools
+    disk is built from whichever is found first.
+    """
+    repo = Path(__file__).resolve().parent.parent.parent
+    candidates = [repo / 'runtime' / 'python',
+                  Path(config.dataset) / 'python-deps' / 'python-runtime' / 'miniconda3',
                   Path(config.dataset) / 'python-runtime' / 'miniconda3']
     for path in candidates:
         if (path / 'bin' / 'python3').is_file() or (path / 'bin' / 'python3.14').is_file():
