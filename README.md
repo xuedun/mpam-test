@@ -103,7 +103,16 @@ sudo ./bwx replay --case-file cases.txt --concurrency 4 --fill --cpu-start 38 --
 
 ## linearity：并发线性度摸底（`bwx linearity`）
 
-按并发档位批量驱动 `bwx replay --fill`，测量每个 case 的耗时随并发的增长，
+先从 case 产物目录提取可重放清单（`--strict` 会顺带校验 dataset 轨迹可加载）：
+
+```bash
+sudo ./bwx case-list --strict --out my-cases.txt   # 或 bwx case-list > my-cases.txt
+```
+
+`case-list` 的 stdout 是干净的 id 清单（一行一个，可重定向），跳过项和摘要走
+stderr；`--json` 给机器可读输出（含 steps / delay_sum_s / 跳过原因）。
+
+然后按并发档位批量驱动 `bwx replay --fill`，测量每个 case 的耗时随并发的增长，
 汇总成 CSV。两层循环全部由入参驱动，脚本不设并发上限（CPU 预算是调用者的
 责任，见 preflight）：
 

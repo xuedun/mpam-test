@@ -6,7 +6,8 @@ Commands map 1:1 onto the experiment phases in docs/EXPERIMENT-PLAN.md:
     convert    build base ext4 images from podman (idempotent)
     replay     concurrent multi-VM trajectory replay (filler mode supported)
     linearity  concurrency-scaling sweep, CSV summary per case
-    list       show converted cases
+    case-list  extract the replayable case ids from a case directory
+    list       show converted cases (image bytes, steps, sha)
     cleanup    remove scratch dirs left by an interrupted run
 """
 import argparse
@@ -28,9 +29,11 @@ def build_parser():
     sub = parser.add_subparsers(dest='command', required=True)
 
     from . import config as config_mod
-    from .commands import cleanup, convert, doctor, linearity, list_, replay
+    from .commands import (case_list, cleanup, convert, doctor, linearity,
+                           list_, replay)
 
-    for module in (doctor, convert, replay, linearity, list_, cleanup):
+    for module in (doctor, convert, replay, linearity, case_list, list_,
+                   cleanup):
         module_parser = sub.add_parser(module.COMMAND, help=module.HELP,
                                        description=module.HELP,
                                        formatter_class=argparse.RawDescriptionHelpFormatter)
