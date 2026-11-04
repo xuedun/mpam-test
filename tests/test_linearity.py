@@ -38,6 +38,62 @@ class ParseLevelsTest(unittest.TestCase):
         with self.assertRaises(Exception):
             _parse_levels('a,b')
 
+    # -- inclusive slices (bash {1..6} style) -----------------------------
+    def test_slice_two_part(self):
+        self.assertEqual(_parse_levels('1:6'), [1, 2, 3, 4, 5, 6])
+
+    def test_slice_three_part(self):
+        self.assertEqual(_parse_levels('1:6:2'), [1, 3, 5])
+
+    def test_slice_stop_on_the_grid(self):
+        self.assertEqual(_parse_levels('2:12:5'), [2, 7, 12])
+
+    def test_slice_single_value(self):
+        self.assertEqual(_parse_levels('3:3'), [3])
+
+    def test_slice_whitespaces_tolerated(self):
+        self.assertEqual(_parse_levels(' 1 : 6 , 8 '), [1, 2, 3, 4, 5, 6, 8])
+
+    def test_mixed_integers_and_slices(self):
+        self.assertEqual(_parse_levels('1,2,4:8,16'),
+                         [1, 2, 4, 5, 6, 7, 8, 16])
+
+    def test_union_across_segments(self):
+        self.assertEqual(_parse_levels('1:4,2,3:5'), [1, 2, 3, 4, 5])
+
+    def test_big_stride_to_48(self):
+        self.assertEqual(_parse_levels('24:48:8'), [24, 32, 40, 48])
+
+    def test_slice_empty_range_rejected(self):
+        with self.assertRaises(Exception):
+            _parse_levels('5:3')
+
+    def test_slice_zero_step_rejected(self):
+        with self.assertRaises(Exception):
+            _parse_levels('1:6:0')
+
+    def test_slice_negative_step_rejected(self):
+        with self.assertRaises(Exception):
+            _parse_levels('6:1:-2')
+
+    def test_slice_zero_start_rejected(self):
+        with self.assertRaises(Exception):
+            _parse_levels('0:6')
+
+    def test_slice_four_parts_rejected(self):
+        with self.assertRaises(Exception):
+            _parse_levels('1:6:2:3')
+
+    def test_slice_hollow_part_rejected(self):
+        for bad in ('1::2', '1:6:', ':6'):
+            with self.assertRaises(Exception, msg=bad):
+                _parse_levels(bad)
+
+    def test_slice_non_integer_rejected(self):
+        for bad in ('x:y', '1.5:6'):
+            with self.assertRaises(Exception, msg=bad):
+                _parse_levels(bad)
+
 
 class ShuffleTest(unittest.TestCase):
     def test_same_seed_same_order(self):

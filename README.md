@@ -142,9 +142,13 @@ for level in levels:                      # --levels 1,2,4,8,...
   `--console off` 丢弃串口
 
 ```bash
-sudo ./bwx linearity --case-file cases.txt --levels 1,2,4,8,16,24 \
+sudo ./bwx linearity --case-file cases.txt --levels 1,2,4:8,24:48:8 \
     --cpu-start 38 --cpu-step 1 --out logs/linearity/run1 --console markers
 ```
+
+`--levels` 每个逗号段可以是整数或**含端点**切片 `start:stop[:step]`（bash
+`{1..6}` 风格）：`1,2,4:8,24:48:8` = 1,2,4,5,6,7,8,24,32,40,48；跨段自动去重
+升序；空区间（`5:3`）、step<1、非整数段直接报错。
 
 输出（都在 `--out` 下）：
 

@@ -83,8 +83,10 @@ def add_arguments(parser):
 
     # -- sweep shape --------------------------------------------------------
     parser.add_argument('--levels', metavar='LIST',
-                        help='comma-separated concurrency levels, ascending '
-                             'order is enforced (default: %s)' % DEFAULT_LEVELS)
+                        help='comma-separated concurrency levels, mixing '
+                             'integers and inclusive slices start:stop[:step] '
+                             '(e.g. "1,2,4:8,24:48:8"; default: %s)'
+                            % DEFAULT_LEVELS)
     parser.add_argument('--no-shuffle', dest='shuffle', action='store_false',
                         default=True,
                         help='group cases in the given order instead of '
@@ -371,18 +373,53 @@ def _subprocess_env():
 
 # ------------------------------------------------------------- shuffling
 def _parse_levels(text, default=None):
+    """Levels syntax: comma-separated segments that mix freely.
+
+    Each segment is either a bare integer or an inclusive slice
+    `start:stop[:step]` (bash `{1..6}` style -- endpoints INCLUDED):
+
+        '1,2,4:8,24:48:8'  ->  [1, 2, 4, 5, 6, 7, 8, 24, 32, 40, 48]
+
+    The union is deduplicated and sorted ascending; empty slices (stop <
+    start), steps < 1, and non-integer parts are rejected on the spot.
+    """
     raw = text if text is not None else default
     if not raw:
-        raise Error('no concurrency level given: pass --levels 1,2,4,8,...')
-    try:
-        levels = [int(part.strip()) for part in str(raw).split(',')
-                  if part.strip()]
-    except ValueError:
-        raise Error('--levels must be comma-separated integers, got %r' % raw)
+        raise Error('no concurrency level given: pass --levels 1,2,4,8,... '
+                    '(slices like 1:6 or 1:48:8 also work)')
+    levels = []
+    for part in str(raw).split(','):
+        part = part.strip()
+        if part:
+            levels.extend(_expand_level_segment(part))
     levels = sorted(set(levels))
     if not levels or levels[0] < 1:
         raise Error('--levels must contain positive integers, got %r' % raw)
     return levels
+
+
+def _expand_level_segment(part):
+    """One comma segment: '7' or '1:6' or '1:6:2' (inclusive endpoints)."""
+    if ':' not in part:
+        try:
+            return [int(part)]
+        except ValueError:
+            raise Error('bad level %r (integer or start:stop[:step])' % part)
+    pieces = part.split(':')
+    if len(pieces) > 3 or not all(piece.strip() for piece in pieces):
+        raise Error('bad level slice %r (want start:stop[:step])' % part)
+    try:
+        start, stop = int(pieces[0]), int(pieces[1])
+        step = int(pieces[2]) if len(pieces) == 3 else 1
+    except ValueError:
+        raise Error('bad level slice %r (non-integer part)' % part)
+    if step < 1:
+        raise Error('level slice %r: step must be >= 1' % part)
+    if start < 1:
+        raise Error('level slice %r: levels start at 1' % part)
+    if stop < start:
+        raise Error('level slice %r: stop below start (empty range)' % part)
+    return list(range(start, stop + 1, step))
 
 
 def _seed_for(out, level):
