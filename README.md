@@ -88,6 +88,58 @@ sudo ./bwx replay --case-file cases.txt --concurrency 4 --fill --cpu-start 38 --
 
 退出码：全部真实 VM completed/budget_exhausted → 0，否则 1。
 
+## linearity：并发线性度摸底（`bwx linearity`）
+
+按并发档位批量驱动 `bwx replay --fill`，测量每个 case 的耗时随并发的增长，
+汇总成 CSV。两层循环全部由入参驱动，脚本不设并发上限（CPU 预算是调用者的
+责任，见 preflight）：
+
+```
+for level in levels:                      # --levels 1,2,4,8,...
+    shuffle case 清单（seed 由 run id + level 派生，落盘可复现）
+    按 level 切成连续的组，组间串行
+    每组: bwx replay --cases <组> --concurrency level --fill ...
+```
+
+- **尾组**：最后一组 case 数不足 level 时，由 replay 的轮转复制契约补满到
+  恰好 level 个真实 VM——每组都是满压测量；尾组 case 会在该档产生多条样本，
+  CSV 取均值
+- **耗时口径**：`case_wall_s`（guest 时钟 CASE_START→CASE_DONE，不含
+  boot/teardown，串口噪声免疫）；filler 永不进样本
+- **preflight**：先 dry-run 最大档（池不足 / 跨 NUMA node 立即报错，不浪费
+  几小时的排期），并校验全部 case 可加载
+- **断点续跑**：每个组处理完（无论成败）打 `.done` 标记；重跑同一 `--out`
+  跳过已标记组；Ctrl-C 只中断当前组（SIGINT 转发给 replay，VM 正常 teardown），
+  该组不打标记、下次重跑
+- **失败策略**：验证失败 / 超时的样本不入均值，CSV 该格留空，批次继续
+
+```bash
+sudo ./bwx linearity --case-file cases.txt --levels 1,2,4,8,16,24 \
+    --cpu-start 38 --cpu-step 2 --out logs/linearity/run1
+```
+
+输出（都在 `--out` 下）：
+
+| 文件 | 内容 |
+|---|---|
+| `linearity.csv` | 行 = case，列 = 并发档，值 = mean(case_wall_s) 秒 |
+| `linearity_ratio.csv` | 同形状，相对该 case 最低有数据档的倍数（n1 = 1.000） |
+| `linearity_detail.csv` | 长表：每条真实 VM 记录（level/group/slot/status/verified/…） |
+| `n<level>/g<idx>/` | 单组 replay 输出（result.json、real/、filler/、带宽、bwx.log） |
+| `n<level>/seed.txt`、`plan.txt` | 该档的 shuffle seed 与分组计划（可复现） |
+
+只重算 CSV 不跑 VM：`sudo ./bwx linearity --out <dir> --summarize-only`。
+透传参数：`--cpu-start/--cpu-step`、`--vcpus/--mem-mib/--numa-node`、
+`--case-timeout/--boot-timeout/--action-timeout/--bandwidth-interval`、
+`--no-tools-disk`、`--discard-work`、`--group-timeout`（组级兜底超时，默认
+2400s，SIGINT→SIGKILL）。
+
+退出码：全部组成功 → 0，存在 vm-failed/timeout/error 组 → 1。
+
+CPU 预算提示：每 VM 占 `vcpus+1` 个 CPU 且全池必须落在同一个 NUMA node
+（node-local membind 是硬校验）。本机 node2 = 38-107、node3 = 108-181，若需
+高并发请选择足够大的单 node 池或降低 vcpus；池不够时 preflight 会 fail-fast。
+
 ## 转换是如何执行的（`bwx convert`）
 
 **输入**：dataset 的 `manifest.csv` + root podman 存储里的镜像 + 轨迹 JSON。

@@ -5,6 +5,7 @@ Commands map 1:1 onto the experiment phases in docs/EXPERIMENT-PLAN.md:
     doctor     verify host prerequisites (tools, KVM, ddrc PMU)
     convert    build base ext4 images from podman (idempotent)
     replay     concurrent multi-VM trajectory replay (filler mode supported)
+    linearity  concurrency-scaling sweep, CSV summary per case
     list       show converted cases
     cleanup    remove scratch dirs left by an interrupted run
 """
@@ -27,9 +28,9 @@ def build_parser():
     sub = parser.add_subparsers(dest='command', required=True)
 
     from . import config as config_mod
-    from .commands import cleanup, convert, doctor, list_, replay
+    from .commands import cleanup, convert, doctor, linearity, list_, replay
 
-    for module in (doctor, convert, replay, list_, cleanup):
+    for module in (doctor, convert, replay, linearity, list_, cleanup):
         module_parser = sub.add_parser(module.COMMAND, help=module.HELP,
                                        description=module.HELP,
                                        formatter_class=argparse.RawDescriptionHelpFormatter)
