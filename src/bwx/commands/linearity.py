@@ -8,10 +8,16 @@ in the preflight):
 
     for level in levels (ascending):
         shuffle the case list once (seed derived from the run id and the
-        level, logged under n<level>/seed.txt -- reproducible)
+        level, logged under n<level>/seed.txt -- reproducible; disable with
+        --no-shuffle to group in the given order instead)
         slice the shuffled list into consecutive groups of `level` cases
         for each group (serially):
             bwx replay --cases <group> --concurrency <level> --fill
+
+Serial capture is forwarded per group via --console off|markers|full
+(default: the config's setting, normally `markers`): the protocol lines
+(BOOT/READY/STEP/CASE_DONE) land in n<level>/g<idx>/real/vm-*/console-*.log
+so execution success is checkable by eye; --console off drops them.
 
 Tail groups: when the last group has fewer cases than `level`, replay's
 expand_cases round-robin replicates it to exactly `level` real VMs, so every
@@ -79,6 +85,11 @@ def add_arguments(parser):
     parser.add_argument('--levels', metavar='LIST',
                         help='comma-separated concurrency levels, ascending '
                              'order is enforced (default: %s)' % DEFAULT_LEVELS)
+    parser.add_argument('--no-shuffle', dest='shuffle', action='store_false',
+                        default=True,
+                        help='group cases in the given order instead of '
+                             'shuffling per level (default: shuffle once per '
+                             'level, seed logged under n<level>/seed.txt)')
     parser.add_argument('--out', type=Path,
                         help='sweep root dir (default: '
                              '<root>/logs/linearity/<stamp>); re-run against '
@@ -163,16 +174,23 @@ def _load_or_create_run(out, ids, levels, args):
             'created': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'cases': list(ids),
             'levels': list(levels),
+            'shuffle': bool(getattr(args, 'shuffle', True)),
             'cpu_start': args.cpu_start,
             'cpu_step': args.cpu_step or 1,
         }
         write_json(path, doc)
     else:
-        for key in ('cases', 'levels'):
-            if list(doc.get(key) or []) != list(ids if key == 'cases' else levels):
+        for key, value in (('cases', list(ids)), ('levels', list(levels))):
+            if list(doc.get(key) or []) != value:
                 print('warning: %s changed since this sweep dir was created; '
                       'the recorded %s is used for the summary'
                       % (key, key))
+        recorded = doc.get('shuffle')
+        current = bool(getattr(args, 'shuffle', True))
+        if recorded is not None and bool(recorded) != current:
+            print('warning: shuffle changed since this sweep dir was created; '
+                  'already-done groups keep their old grouping, new groups '
+                  'follow --%s' % ('shuffle' if current else 'no-shuffle'))
     if not doc.get('run_id'):
         raise Error('%s: missing run_id' % path)
     return doc
@@ -210,13 +228,15 @@ def _sweep(out, ids, levels, args):
     for level in levels:
         level_dir = out / ('n%d' % level)
         seed = _seed_for(out, level)
-        order = _shuffled(ids, seed)
+        shuffle = bool(getattr(args, 'shuffle', True))
+        order = _shuffled(ids, seed) if shuffle else list(ids)
         groups = _chunks(order, level)
-        _write_seed(level_dir, seed, order, groups)
+        _write_seed(level_dir, seed, order, groups, shuffle=shuffle)
         pending = [gdir for _, gdir in _group_dirs(level_dir, groups)
                    if not (gdir / DONE_MARKER).exists()]
-        print('[n%d] %d group(s), %d already done, seed 0x%016x'
-              % (level, len(groups), len(groups) - len(pending), seed))
+        print('[n%d] %d group(s), %d already done, %s 0x%016x'
+              % (level, len(groups), len(groups) - len(pending),
+                 'seed' if shuffle else 'order', seed))
 
         for index, (group, gdir) in enumerate(_group_dirs(level_dir, groups)):
             if not (gdir / DONE_MARKER).exists():
@@ -327,6 +347,15 @@ def _replay_cmd(args, group, level, out_dir):
         cmd.append('--no-tools-disk')
     if args.discard_work:
         cmd.append('--discard-work')
+    console = getattr(args, 'console', None)
+    if console is not None:
+        # Serial capture forwarded per group: `markers` keeps the protocol
+        # lines (BOOT/READY/STEP/CASE_DONE) so success is checkable in
+        # n<level>/g<idx>/real/vm-*/console-markers.log; `full` adds all
+        # console noise; `off` discards.
+        cmd += ['--console', console]
+    if getattr(args, 'console_verify', True) is False:
+        cmd.append('--no-console-verify')
     if getattr(args, 'config', None) is not None:
         cmd += ['--config', str(args.config)]
     return cmd
@@ -384,11 +413,11 @@ def _chunk_count(total, size):
     return (total + size - 1) // size
 
 
-def _write_seed(level_dir, seed, order, groups):
+def _write_seed(level_dir, seed, order, groups, *, shuffle=True):
     level_dir.mkdir(parents=True, exist_ok=True)
     path = level_dir / 'seed.txt'
     if not path.exists():
-        path.write_text('0x%016x\n' % seed)
+        path.write_text(('0x%016x\n' % seed) if shuffle else 'off\n')
     (level_dir / 'plan.txt').write_text(
         '\n'.join('g%02d: %s' % (index, ','.join(group))
                   for index, group in enumerate(groups)) + '\n')

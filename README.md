@@ -134,10 +134,16 @@ for level in levels:                      # --levels 1,2,4,8,...
   跳过已标记组；Ctrl-C 只中断当前组（SIGINT 转发给 replay，VM 正常 teardown），
   该组不打标记、下次重跑
 - **失败策略**：验证失败 / 超时的样本不入均值，CSV 该格留空，批次继续
+- **shuffle 开关**：默认每档 shuffle 一次（seed 落盘可复现）；`--no-shuffle`
+  按传入顺序分组（组构成稳定，便于复现/排查）
+- **串口档位**：`--console off|markers|full` 逐组透传（默认沿用 config 的
+  `markers`）。markers/full 时协议行（BOOT/READY/STEP/CASE_DONE）留在
+  `n<level>/g<idx>/real/vm-*/console-*.log`，可直接目检执行是否成功；
+  `--console off` 丢弃串口
 
 ```bash
 sudo ./bwx linearity --case-file cases.txt --levels 1,2,4,8,16,24 \
-    --cpu-start 38 --cpu-step 2 --out logs/linearity/run1
+    --cpu-start 38 --cpu-step 1 --out logs/linearity/run1 --console markers
 ```
 
 输出（都在 `--out` 下）：

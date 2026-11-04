@@ -5,8 +5,9 @@ import unittest
 from pathlib import Path
 
 from bwx.commands.linearity import (
-    _aggregate, _chunks, _collect_samples, _parse_levels, _replay_cmd,
-    _seed_for, _shuffled, _write_wide)
+    _aggregate, _chunks, _collect_samples, _load_or_create_run,
+    _parse_levels, _replay_cmd, _seed_for, _shuffled, _write_seed,
+    _write_wide)
 
 
 def _fake_record(case, slot, wall, status='completed', verified=True):
@@ -61,6 +62,44 @@ class ShuffleTest(unittest.TestCase):
             self.assertEqual(_seed_for(out.parent, 8), 0xdead)
 
 
+class ShuffleSwitchTest(unittest.TestCase):
+    def _parser(self):
+        from bwx.cli import build_parser
+        return build_parser()
+
+    def test_shuffle_is_on_by_default(self):
+        ns = self._parser().parse_args(['linearity', '--cases', 'a'])
+        self.assertTrue(ns.shuffle)
+
+    def test_no_shuffle_flag(self):
+        ns = self._parser().parse_args(
+            ['linearity', '--cases', 'a', '--no-shuffle'])
+        self.assertFalse(ns.shuffle)
+
+    def test_seed_file_records_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            level_dir = Path(tmp) / 'n4'
+            _write_seed(level_dir, 42, ['a', 'b'], [['a', 'b']],
+                        shuffle=False)
+            self.assertEqual((level_dir / 'seed.txt').read_text(), 'off\n')
+            self.assertEqual((level_dir / 'plan.txt').read_text(),
+                             'g00: a,b\n')
+
+    def test_run_manifest_records_shuffle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            args = argparse.Namespace(cpu_start=None, cpu_step=None,
+                                      shuffle=False)
+            doc = _load_or_create_run(out, ['a'], [1, 2], args)
+            self.assertFalse(doc['shuffle'])
+            self.assertEqual(doc['cases'], ['a'])
+            # resume keeps the recorded setting even if the flag flips
+            other = argparse.Namespace(cpu_start=None, cpu_step=None,
+                                       shuffle=True)
+            reloaded = _load_or_create_run(out, ['a'], [1, 2], other)
+            self.assertFalse(reloaded['shuffle'])
+
+
 class ChunkTest(unittest.TestCase):
     def test_even_split(self):
         self.assertEqual(_chunks(['a', 'b', 'c', 'd'], 2),
@@ -78,10 +117,12 @@ class ReplayCmdTest(unittest.TestCase):
     def _args(self, **kwargs):
         base = dict(case=[], cases=None, case_file=None, levels='1,2',
                     out=None, group_timeout=99, summarize_only=False,
-                    cpu_start=None, cpu_step=None, vcpus=None, mem_mib=None,
-                    numa_node=None, case_timeout=None, boot_timeout=None,
-                    action_timeout=None, bandwidth_interval=None,
-                    no_tools_disk=False, discard_work=False, config=None)
+                    shuffle=True, cpu_start=None, cpu_step=None, vcpus=None,
+                    mem_mib=None, numa_node=None, case_timeout=None,
+                    boot_timeout=None, action_timeout=None,
+                    bandwidth_interval=None, console=None,
+                    console_verify=True, no_tools_disk=False,
+                    discard_work=False, config=None)
         base.update(kwargs)
         return argparse.Namespace(**base)
 
@@ -91,6 +132,17 @@ class ReplayCmdTest(unittest.TestCase):
         self.assertIn('--concurrency', cmd)
         self.assertEqual(cmd[cmd.index('--concurrency') + 1], '4')
         self.assertEqual(cmd[cmd.index('--cases') + 1], 'a,b')
+
+    def test_console_is_forwarded(self):
+        cmd = _replay_cmd(self._args(console='full'), ['a'], 1, Path('/tmp/g'))
+        self.assertEqual(cmd[cmd.index('--console') + 1], 'full')
+        cmd = _replay_cmd(self._args(console='off'), ['a'], 1, Path('/tmp/g'))
+        self.assertEqual(cmd[cmd.index('--console') + 1], 'off')
+
+    def test_console_verify_optout_is_forwarded(self):
+        cmd = _replay_cmd(self._args(console_verify=False), ['a'], 1,
+                          Path('/tmp/g'))
+        self.assertIn('--no-console-verify', cmd)
 
     def test_cpu_and_tuning_forwarded(self):
         args = self._args(cpu_start=38, cpu_step=2, vcpus=2, mem_mib=2048,
@@ -107,7 +159,8 @@ class ReplayCmdTest(unittest.TestCase):
     def test_defaults_forward_nothing(self):
         cmd = _replay_cmd(self._args(), ['a'], 1, Path('/tmp/g'))
         for flag in ('--cpu-start', '--vcpus', '--mem-mib', '--case-timeout',
-                     '--no-tools-disk', '--discard-work', '--config'):
+                     '--no-tools-disk', '--discard-work', '--config',
+                     '--console', '--no-console-verify'):
             self.assertNotIn(flag, cmd)
 
 
