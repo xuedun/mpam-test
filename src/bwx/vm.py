@@ -22,12 +22,14 @@ Key decisions (each one exists because of a measured failure mode):
   `panic=1 reboot=k` init failure, so exit code alone cannot distinguish success
   from a dead VM.
 
-NUMA/CPU placement: `numactl --physcpubind=<cpus> --membind=<node>` wraps the VMM
-so every thread inherits the affinity and the memory policy. After launch we pin
-each `fc_vcpu N` thread to its own CPU and the remaining threads to a dedicated
-helper CPU, then verify the pinning actually took. Both verifications
-(vcpu_pinning / guest_ram_numa) are recorded, and a run that passed the guest but
-failed placement is reported as `placement_failed` rather than silently accepted.
+NUMA/CPU placement: `numactl --physcpubind=<cpus> --membind=<nodes>` wraps the
+VMM so every thread inherits the affinity and the memory policy (a VM whose
+CPUs span NUMA nodes membinds to that node set). After launch we pin each
+`fc_vcpu N` thread to its own CPU; control-plane threads (main/API/serial)
+keep the VM's whole mask and share it with the vCPUs -- there is no dedicated
+helper CPU. Both verifications (vcpu_pinning / guest_ram_numa) are recorded,
+and a run that passed the guest but failed placement is reported as
+`placement_failed` rather than silently accepted.
 """
 import json
 import os
@@ -193,9 +195,9 @@ class VmRun:
         return self.target
 
     def launch_command(self):
-        """argv for the VMM, wrapped in numactl and (optionally) the MPAM join."""
+        """argv for the VMM, wrapped in numactl (affinity + memory policy)."""
         return ['numactl', '--physcpubind=%s' % self.placement.physcpubind,
-                '--membind=%d' % self.placement.node,
+                '--membind=%s' % ','.join(str(n) for n in self.placement.nodes),
                 str(self.config.firecracker), '--no-api', '--id', self.token,
                 '--config-file', str(self.target / 'vm-config.json')]
 
@@ -409,8 +411,7 @@ class VmRun:
                     return
         except OSError:
             return
-        vcpu_cpus = self.placement.vcpu_cpus
-        helper = self.placement.helper_cpu
+        vcpu_cpus = self.placement.cpus
         pinned_vcpus = 0
         for entry in task_dir.iterdir():
             tid = entry.name
@@ -428,11 +429,9 @@ class VmRun:
                     pins[tid] = {'name': name, 'cpu': vcpu_cpus[index], 'role': 'vcpu%d' % index}
                     pinned_vcpus += 1
             else:
-                # Do not narrow the main thread before vCPU threads exist: they
-                # would inherit the wrong mask. Pin helpers once any vCPU is set.
-                if pinned_vcpus or name != 'firecracker':
-                    self._set_affinity(tid, {helper})
-                    pins[tid] = {'name': name, 'cpu': helper, 'role': 'helper'}
+                # Control-plane threads (main/API/serial) keep the VM's whole
+                # mask from numactl; no dedicated helper CPU to pin them to.
+                pins[tid] = {'name': name, 'cpu': None, 'role': 'helper'}
 
     @staticmethod
     def _set_affinity(tid, cpus):
@@ -514,14 +513,17 @@ class VmRun:
         return None
 
     def _ram_on_node(self, samples):
-        """True when the guest RAM mapping was found and every present page is on
-        the bound node. Requiring at least one observation matters: a VM that died
-        before its RAM was mapped must not be reported as correctly placed.
+        """True when the guest RAM mapping was found and every present page is
+        on the bound node set (cross-node VMs membind to all their nodes, so
+        pages may land on any of them). Requiring at least one observation
+        matters: a VM that died before its RAM was mapped must not be reported
+        as correctly placed.
         """
         observed = [s for s in samples if s.get('guest_ram_nodes')]
         if not observed:
             return False
-        return all(s['guest_ram_nodes'] == [self.placement.node] for s in observed)
+        allowed = set(self.placement.nodes)
+        return all(set(s['guest_ram_nodes']) <= allowed for s in observed)
 
     def _apply_timing(self, result, filter_, disk_summary, wall_s):
         """Fill timing fields, preferring guest nanosecond counters.

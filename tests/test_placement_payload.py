@@ -24,46 +24,63 @@ class CpuListTest(unittest.TestCase):
 
 
 class PlacementTest(unittest.TestCase):
-    def test_dedicated_layout(self):
-        """vcpus CPUs for vCPUs + exactly one helper CPU."""
-        placement = Placement(2, [38, 40, 42])
+    def test_vcpu_only_layout(self):
+        """Every CPU is a vCPU CPU; there is no helper CPU."""
+        placement = Placement(2, [38, 40])
         self.assertEqual(placement.vcpu_cpus, [38, 40])
-        self.assertEqual(placement.helper_cpu, 42)
-        self.assertEqual(placement.physcpubind, '38,40,42')
+        self.assertEqual(placement.cpus, [38, 40])
+        self.assertEqual(placement.physcpubind, '38,40')
+        self.assertEqual(placement.node, 2)
 
-    def test_dedicated_needs_at_least_two(self):
-        with self.assertRaises(Exception):
-            Placement(2, [38])
+    def test_single_cpu_placement_is_legal(self):
+        """vcpus=1 must work: the old vcpus+1 floor is gone."""
+        self.assertEqual(Placement(2, [38]).cpus, [38])
 
-    def test_helper_is_distinct_from_vcpus(self):
-        """The helper CPU must never double as a vCPU CPU."""
-        for count in (3, 4):
-            placement = Placement(2, list(range(count)))
-            self.assertNotIn(placement.helper_cpu, placement.vcpu_cpus)
-            self.assertEqual(len(placement.vcpu_cpus) + 1, len(placement.cpus))
+    def test_nodes_spans_cpus(self):
+        """A placement whose CPUs live on two nodes reports both."""
+        from bwx.placement import node_ids, node_cpus
+        nodes = node_ids()
+        if len(nodes) < 2:
+            self.skipTest('single node host')
+        a, b = nodes[0], nodes[1]
+        cpu_a, cpu_b = min(node_cpus(a)), min(node_cpus(b))
+        placement = Placement(a, [cpu_a, cpu_b])
+        self.assertEqual(placement.nodes, [a, b])
+        self.assertEqual(placement.node, a)
 
     def test_validate_detects_overlap(self):
-        a = Placement(2, [38, 40, 42])
-        b = Placement(2, [42, 44, 46])
+        a = Placement(2, [38, 40])
+        b = Placement(2, [40, 42])
         with self.assertRaises(Exception) as caught:
             Allocator.validate([a, b])
-        self.assertIn('42', str(caught.exception))
+        self.assertIn('40', str(caught.exception))
 
-    def test_validate_detects_wrong_node(self):
-        placement = Placement(2, [0, 1, 3])          # CPUs 0,1,3 are on node 0
+    def test_validate_allows_cross_node(self):
+        """Cross-NUMA placements are legal (each VM membinds its node set)."""
+        from bwx.placement import node_ids, node_cpus
+        nodes = node_ids()
+        if len(nodes) < 2:
+            self.skipTest('single node host')
+        cpu_a = min(node_cpus(nodes[0]))
+        cpu_b = min(node_cpus(nodes[1]))
+        self.assertTrue(Allocator.validate([Placement(nodes[0], [cpu_a, cpu_b])]))
+
+    def test_validate_rejects_unknown_cpu(self):
         with self.assertRaises(Exception) as caught:
-            Allocator.validate([placement])
-        self.assertIn('not on node', str(caught.exception))
+            Allocator.validate([Placement(2, [38, 999999])])
+        self.assertIn('not online', str(caught.exception))
 
-    def test_validate_detects_smt_siblings(self):
-        # Topology-dependent: on this host 0/1 are SMT siblings; on a non-SMT
-        # host the sibling map has singletons and the check is a no-op.
-        conflicts = smt_sibling_conflicts([0, 1, 2])
-        if not conflicts:
-            self.skipTest('host has no SMT siblings to conflict')
-        placement = Placement(0, [0, 1, 2])
-        with self.assertRaises(Exception):
-            Allocator.validate([placement])
+    def test_validate_allows_smt_siblings(self):
+        """SMT density is the caller's choice (step), not a placement error."""
+        from bwx.placement import node_cpus, smt_sibling_conflicts
+        pair = None
+        for cpu in node_cpus(0, allowed_only=False):
+            pair = next(iter(smt_sibling_conflicts([cpu, cpu + 1]).values()), None)
+            if pair:
+                break
+        if not pair:
+            self.skipTest('host has no adjacent SMT siblings to pack')
+        self.assertTrue(Allocator.validate([Placement(0, pair)]))
 
 
 class AllocatorTest(unittest.TestCase):

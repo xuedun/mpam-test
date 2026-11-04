@@ -13,11 +13,14 @@ Design (one command, four input axes):
 
 3. **CPU binding** -- one of:
    * `--cpu-list "0,2,4-6"` (explicit pool, split into per-VM chunks)
-   * `--cpu-list-file FILE` (same, from a text or JSON file)
+   * `--cpu-list-file FILE` (same, from a text or a JSON file)
    * `--cpu-start S --cpu-step P` (generate S, S+P, S+2P, ... -- auto-inference)
    * none of the above: auto-allocation from --numa-node (SMT-aware)
-   Every VM gets vcpus+1 cpus (the +1 is the Firecracker helper thread); all
-   placements are validated for disjointness and node membership.
+   Every VM gets exactly vcpus cpus (one per vCPU; Firecracker control-plane
+   threads share the VM's mask -- there is no dedicated helper CPU). Pools may
+   span NUMA nodes (each VM membinds to its own node set); placements are
+   validated for disjointness and liveness. step=1 packs SMT siblings into a
+   VM, step=2 gives each vCPU its own physical core.
 
 4. **Fill mode** (`--fill`) -- keeps the machine loaded for the whole batch:
    the first N VMs are *real* (their records are the measurement). When a real
@@ -70,15 +73,15 @@ def add_arguments(parser):
     # -- 3. cpu binding ---------------------------------------------------
     parser.add_argument('--cpu-list', metavar='LIST',
                         help='explicit cpu pool, e.g. "0,2,4-6" (split into '
-                             'per-VM chunks of vcpus+1)')
+                             'per-VM chunks of vcpus)')
     parser.add_argument('--cpu-list-file', type=Path, metavar='FILE',
                         help='cpu pool from a file (text: commas/spaces/lines, '
                              'a-b ranges; or JSON array / {"cpus": [...]})')
     parser.add_argument('--cpu-start', type=int, metavar='CPU',
                         help='generate cpus as start + i*step (with --cpu-step)')
     parser.add_argument('--cpu-step', type=int, metavar='N',
-                        help='step for --cpu-start (vcpus+1 = compact blocks; '
-                             'larger skips SMT siblings). Default 1.')
+                        help='step for --cpu-start (1 = compact, packs SMT '
+                             'siblings; 2 = one vCPU per physical core). Default 1.')
 
     # -- 4. fill mode -----------------------------------------------------
     parser.add_argument('--fill', action='store_true',
@@ -132,16 +135,17 @@ def run(args):
     placements = _placements(config, args, count)
     plan = _plan_records(expanded, placements)
 
-    print('replay plan: %s | mode=%s | node=%d | vcpus=%d mem=%dMiB'
-          % (note, 'fill' if args.fill else 'normal', placements[0].node,
+    print('replay plan: %s | mode=%s | nodes=%s | vcpus=%d mem=%dMiB'
+          % (note, 'fill' if args.fill else 'normal', placements[0].nodes,
              config.vcpus, config.mem_mib))
     for item in plan:
         print('  VM%-2d %-45s cpus=%s' % (item['slot'], item['case'], item['cpus']))
     context.snapshot({'mode': 'fill' if args.fill else 'normal', 'cases': ids,
                       'concurrency': count, 'note': note,
-                      'plan': [{'slot': i['slot'], 'case': i['case'],
-                                'node': i['placement'].node, 'cpus': i['cpus']}
-                               for i in plan],
+                  'plan': [{'slot': i['slot'], 'case': i['case'],
+                            'node': i['placement'].node,
+                            'nodes': i['placement'].nodes, 'cpus': i['cpus']}
+                           for i in plan],
                       'args': driver.snapshot_args(args)})
     if args.dry_run:
         return 0
@@ -203,18 +207,17 @@ def _collect_case_ids(args):
 def _placements(config, args, count):
     """CPU binding: explicit pool / pool file / start+step / auto from node.
 
-    With any explicit cpu input the NUMA node is inferred from the cpus
-    themselves (membind must match where the cpus live); --numa-node is only
-    consulted for the auto-allocation path.
+    Explicit cpu pools may span NUMA nodes (each VM membinds to its own node
+    set); --numa-node is only consulted for the auto-allocation path.
     """
     vcpus = config.vcpus
     if args.cpu_start is not None:
         step = args.cpu_step if args.cpu_step else 1
-        pool = [args.cpu_start + i * step for i in range((vcpus + 1) * count)]
-        node = placement_mod.node_of_cpu(pool[0])
-        if node is None:
-            raise Error('--cpu-start %d is not an online cpu on any node' % pool[0])
-        return placement_mod.placements_from_pool(pool, node, vcpus, count)
+        if placement_mod.node_of_cpu(args.cpu_start) is None:
+            raise Error('--cpu-start %d is not an online cpu on any node'
+                        % args.cpu_start)
+        return placement_mod.placements_from_start_step(args.cpu_start, step,
+                                                        vcpus, count)
     if args.cpu_list_file is not None:
         pool = placement_mod.read_cpu_pool(args.cpu_list_file)
     elif args.cpu_list:
@@ -223,10 +226,7 @@ def _placements(config, args, count):
         allocator = placement_mod.Allocator([config.numa_node], vcpus,
                                             mem_mib=config.mem_mib)
         return allocator.take_many(count)
-    node = placement_mod.node_of_cpu(pool[0])
-    if node is None:
-        raise Error('cpu %d is not an online cpu on any node' % pool[0])
-    return placement_mod.placements_from_pool(pool, node, vcpus, count)
+    return placement_mod.placements_from_pool(pool, vcpus, count)
 
 
 def _plan_records(expanded, placements):

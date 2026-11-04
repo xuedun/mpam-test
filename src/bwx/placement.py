@@ -1,16 +1,23 @@
-"""CPU/NUMA placement: who runs where, disjointly, and provably.
+"""CPU/NUMA placement: disjoint, vcpu-only bindings.
 
-Three guarantees the experiment depends on:
+Two guarantees the experiment depends on:
 
-1. **Disjoint CPU sets.** Every VM gets `vcpus + 1` CPUs (the extra one is the
-   Firecracker helper: main thread, API/logger threads). Overlapping CPU sets
-   would turn a memory-bandwidth measurement into a CPU-contention measurement.
-2. **Node-local memory.** Each VM is bound to one NUMA node's CPUs *and* that
-   node's memory (`numactl --membind`). Bandwidth caps are per MB domain, and the
-   ddrc counters are per node, so a VM straddling nodes cannot be attributed.
-3. **SMT-aware selection.** Only one thread per physical core is handed out by
-   default; SMT siblings sharing a core would contend for the same execution
-   resources and pollute per-core bandwidth numbers.
+1. **Disjoint CPU sets.** No two VMs share a logical CPU: overlapping sets
+   would turn a concurrency measurement into a scheduling artifact.
+2. **vcpu-only binding.** Every VM gets exactly `vcpus` CPUs, one per vCPU
+   thread (pinned individually after launch). Firecracker's control-plane
+   threads (main/API/serial) are *not* given a dedicated CPU; they stay on
+   the VM's own affinity mask and share it with the vCPUs.
+
+Cross-NUMA pools are allowed: a VM whose CPUs span nodes is membound to the
+set of those nodes, so its memory stays local to wherever its CPUs live.
+`Placement.node` keeps the primary node (first CPU) for reporting and
+bandwidth attribution.
+
+SMT density is the caller's trade-off, expressed through the pool itself:
+consecutive CPUs (e.g. `--cpu-step 1`) put SMT siblings in one VM (the two
+vCPUs share a physical core), a step of 2 gives each vCPU its own physical
+core. No SMT validation is imposed.
 
 Unlike the upstream implementation, this allocator does *not* scan /proc for other
 users' firecracker processes to avoid their CPUs. On a shared host that scan is a
@@ -30,33 +37,35 @@ _CPU_DIR = Path('/sys/devices/system/cpu')
 
 
 class Placement:
-    """CPU/NUMA placement for one VM."""
+    """CPU/NUMA placement for one VM (vcpu-only: len(cpus) == vcpus)."""
 
-    def __init__(self, node, cpus, *, helper_mode='dedicated'):
+    def __init__(self, node, cpus):
         self.node = int(node)
         self.cpus = [int(c) for c in cpus]
-        self.helper_mode = helper_mode
         if not self.cpus:
             raise Error('placement needs at least one CPU')
-        if helper_mode == 'dedicated' and len(self.cpus) < 2:
-            raise Error('dedicated helper mode needs vcpus+1 CPUs')
+
+    @property
+    def nodes(self):
+        """All NUMA nodes this VM's CPUs live on (primary first)."""
+        seen = []
+        for cpu in self.cpus:
+            node = node_of_cpu(cpu)
+            if node is not None and node not in seen:
+                seen.append(node)
+        return seen
 
     @property
     def vcpu_cpus(self):
-        """One CPU per vCPU; the last CPU is reserved for helper threads."""
-        return self.cpus[:-1] if self.helper_mode == 'dedicated' and len(self.cpus) > 1 \
-            else self.cpus
-
-    @property
-    def helper_cpu(self):
-        return self.cpus[-1]
+        """One CPU per vCPU (there is no separate helper CPU)."""
+        return self.cpus
 
     @property
     def physcpubind(self):
         return ','.join(str(c) for c in self.cpus)
 
     def as_dict(self):
-        return {'node': self.node, 'cpus': self.cpus, 'helper_mode': self.helper_mode}
+        return {'node': self.node, 'nodes': self.nodes, 'cpus': self.cpus}
 
 
 def node_ids():
@@ -124,7 +133,7 @@ def smt_sibling_conflicts(cpus):
 
 
 def node_capacity(node, *, smt=True, per_vm=None):
-    """How many VMs a node can host given vcpus+1 CPUs each."""
+    """How many VMs a node can host given vcpus CPUs each."""
     cpus = select_cores(node_cpus(node), smt=smt)
     if not per_vm:
         return len(cpus), cpus
@@ -161,19 +170,18 @@ class Allocator:
         alloc.validate([p1, p2])   # raises on any overlap
     """
 
-    def __init__(self, nodes, vcpus, *, smt=True, mem_mib=4096, helper_mode='dedicated',
+    def __init__(self, nodes, vcpus, *, smt=True, mem_mib=4096,
                  reserve_gib=2):
         self.vcpus = int(vcpus)
         self.smt = smt
         self.mem_mib = int(mem_mib)
-        self.helper_mode = helper_mode
-        self.per_vm = vcpus + (1 if helper_mode == 'dedicated' else 0)
+        self.per_vm = vcpus
         self.pools = {}
         for node in nodes:
             cpus = select_cores(node_cpus(node), smt=smt)
             if len(cpus) < self.per_vm:
                 raise Error('node %d has only %d usable CPUs, need %d per VM '
-                            '(vcpus=%d + helper)' % (node, len(cpus), self.per_vm, vcpus))
+                            '(vcpus=%d)' % (node, len(cpus), self.per_vm, vcpus))
             capacity = memory_available_kib(node)
             required = self.mem_mib * 1024 + reserve_gib * 1024 ** 2
             if capacity < required:
@@ -202,7 +210,7 @@ class Allocator:
                         % (node, pool['cursor'] // self.per_vm, len(pool['cpus'])))
         cpus = pool['cpus'][pool['cursor']:pool['cursor'] + self.per_vm]
         pool['cursor'] += self.per_vm
-        return Placement(node, cpus, helper_mode=self.helper_mode)
+        return Placement(node, cpus)
 
     def take_many(self, count, *, spread=False):
         """`count` disjoint placements. spread=True round-robins across nodes.
@@ -228,25 +236,29 @@ class Allocator:
 
     @staticmethod
     def validate(placements):
-        """Assert disjointness, node membership and SMT safety. Raises Error."""
+        """Assert disjoint CPU sets and online CPUs. Raises Error.
+
+        Cross-node placements are legal (each VM membinds to its own node
+        set); SMT density is the caller's choice, not an error.
+        """
+        node_map = node_cpulists()
+        known = set()
+        for cpus in node_map.values():
+            known |= cpus
         seen = {}
         for index, placement in enumerate(placements):
-            node_cpus_set = set(node_cpus(placement.node))
             for cpu in placement.cpus:
                 if cpu in seen:
                     raise Error('CPU %d assigned to both VM %d and VM %d'
                                 % (cpu, seen[cpu], index))
+                if cpu not in known:
+                    raise Error('CPU %d is not online on any NUMA node' % cpu)
                 seen[cpu] = index
-                if cpu not in node_cpus_set:
-                    raise Error('CPU %d is not on node %d' % (cpu, placement.node))
-            conflicts = smt_sibling_conflicts(placement.cpus)
-            if conflicts:
-                raise Error('VM %d got SMT siblings on one core: %s' % (index, conflicts))
         return True
 
     def as_dict(self):
         return {'vcpus': self.vcpus, 'per_vm': self.per_vm, 'smt': self.smt,
-                'mem_mib': self.mem_mib, 'helper_mode': self.helper_mode,
+                'mem_mib': self.mem_mib,
                 'capacity': self.capacity()[0],
                 'pools': {str(n): {'total': len(p['cpus']), 'used': p['cursor'],
                                    'max_vms': p['max_vms']}
@@ -303,41 +315,46 @@ def read_cpu_pool(source):
     return parse_cpu_list(text)
 
 
-def placements_from_pool(cpus, node, vcpus, count, *, helper_mode='dedicated'):
+def placements_from_pool(cpus, vcpus, count):
     """Split a cpu pool into `count` disjoint placements, in pool order.
 
-    Each VM consumes vcpus+1 cpus (the last one is the Firecracker helper
-    thread). The pool must be large enough and every cpu must belong to `node`.
+    Each VM consumes exactly `vcpus` cpus (vcpu-only binding; control-plane
+    threads share the VM's mask). The pool may span NUMA nodes: a VM is
+    membound to the nodes its cpus live on. Unknown/offline cpus are
+    rejected.
     """
-    per_vm = vcpus + 1
+    per_vm = vcpus
     needed = per_vm * count
     if len(cpus) < needed:
         raise Error('cpu pool too small: %d cpu(s), need %d (%d VMs x %d)'
                     % (len(cpus), needed, count, per_vm))
-    node_set = set(node_cpus(node))
-    stray = [c for c in cpus if c not in node_set]
-    if stray:
-        raise Error('cpus %s are not on node %d' % (stray[:8], node))
-    placements = [Placement(node, cpus[i * per_vm:(i + 1) * per_vm],
-                            helper_mode=helper_mode)
+    node_map = node_cpulists()
+    known = set()
+    for node_cpus_set in node_map.values():
+        known |= node_cpus_set
+    unknown = [c for c in cpus if c not in known]
+    if unknown:
+        raise Error('cpus %s are not online on any NUMA node' % unknown[:8])
+    placements = [Placement(node_of_cpu(cpus[i * per_vm]),
+                            cpus[i * per_vm:(i + 1) * per_vm])
                   for i in range(count)]
     Allocator.validate(placements)
     return placements
 
 
-def placements_from_start_step(start, step, node, vcpus, count, *,
-                               helper_mode='dedicated'):
-    """Generate cpu slots as start + i*step (auto-inference mode).
+def placements_from_start_step(start, step, vcpus, count):
+    """Generate cpu slots as start + i*step, per-VM chunks of `vcpus`.
 
-    step=vcpus+1 gives compact blocks; step>1 can skip SMT siblings. The
-    generated cpus are validated for node membership and disjointness exactly
-    like an explicit pool.
+    step=1 packs consecutive cpus (SMT siblings share a physical core);
+    a larger step spreads vCPUs across physical cores. The generated cpus
+    are validated for disjointness and liveness exactly like an explicit
+    pool, and may cross NUMA nodes.
     """
     if step < 1:
         raise Error('--cpu-step must be >= 1')
-    needed = (vcpus + 1) * count
+    needed = vcpus * count
     cpus = [start + i * step for i in range(needed)]
-    return placements_from_pool(cpus, node, vcpus, count, helper_mode=helper_mode)
+    return placements_from_pool(cpus, vcpus, count)
 
 
 def node_of_cpu(cpu):

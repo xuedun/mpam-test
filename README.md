@@ -56,12 +56,25 @@ sudo ./bwx replay --case-file cases.txt --concurrency 8   # 3 个 case 复制到
 
 | 参数 | 语义 |
 |---|---|
-| `--cpu-list "38,40,42-48"` | 显式 CPU 池（支持 a-b 区间），按 vcpus+1 逐 VM 顺序切片 |
+| `--cpu-list "38,40,42-48"` | 显式 CPU 池（支持 a-b 区间），按 vcpus 逐 VM 顺序切片 |
 | `--cpu-list-file FILE` | 同上，从文件读（文本：逗号/空格/换行/区间；或 JSON 数组 / `{"cpus":[...]}`） |
-| `--cpu-start 38 --cpu-step 2` | 自动生成 `start + i*step` 序列（step=vcpus+1 紧凑分块；更大步长跳过 SMT 兄弟） |
+| `--cpu-start 38 --cpu-step 1` | 自动生成 `start + i*step` 序列，再按 vcpus 切片 |
 | 不传 | 从 `--numa-node` 自动分配（SMT 感知、互不相交） |
 
-**NUMA node 自动推断**：给了显式 CPU（list/文件/start）时，node 由 CPU 所在位置推断（membind 必须与 CPU 同 node），无需再传 `--numa-node`。所有放置都校验：互不相交、同 node、无 SMT 兄弟冲突；每 VM 占 `vcpus+1` 个 CPU（+1 是 Firecracker helper 线程）。
+**每 VM 恰好 `vcpus` 个 CPU**，逐 vCPU 线程独占绑核；Firecracker 控制面线程
+（主线程/API/串口）不占专属 CPU，与 vCPU 共享 VM 的亲和掩码。
+
+**跨 NUMA node 合法**：池可以跨 node（如从 38 连续用到 181），VM 的
+`numactl --membind` 绑到它自己的 CPU 所在 node 集合，内存仍在本地域内。
+所有放置校验：跨 VM CPU 互不相交、CPU 在线；`node` 字段保留主 node（首个
+CPU）用于报表与带宽归因。
+
+**SMT 密度由 step 表达**（本机兄弟对是相邻编号，38/39 同物理核）：
+
+- `--cpu-step 1`：紧凑打包，VM 的 2 个 vCPU 落在同一物理核（半核/VM 密度）
+- `--cpu-step 2`：每个 vCPU 独占一个物理核
+
+`--numa-node` 仅在自动分配路径使用。
 
 ### 4. 填充模式（`--fill`）
 
@@ -106,7 +119,7 @@ for level in levels:                      # --levels 1,2,4,8,...
   CSV 取均值
 - **耗时口径**：`case_wall_s`（guest 时钟 CASE_START→CASE_DONE，不含
   boot/teardown，串口噪声免疫）；filler 永不进样本
-- **preflight**：先 dry-run 最大档（池不足 / 跨 NUMA node 立即报错，不浪费
+- **preflight**：先 dry-run 最大档（CPU 池不足 / 离线 CPU 立即报错，不浪费
   几小时的排期），并校验全部 case 可加载
 - **断点续跑**：每个组处理完（无论成败）打 `.done` 标记；重跑同一 `--out`
   跳过已标记组；Ctrl-C 只中断当前组（SIGINT 转发给 replay，VM 正常 teardown），
@@ -136,9 +149,10 @@ sudo ./bwx linearity --case-file cases.txt --levels 1,2,4,8,16,24 \
 
 退出码：全部组成功 → 0，存在 vm-failed/timeout/error 组 → 1。
 
-CPU 预算提示：每 VM 占 `vcpus+1` 个 CPU 且全池必须落在同一个 NUMA node
-（node-local membind 是硬校验）。本机 node2 = 38-107、node3 = 108-181，若需
-高并发请选择足够大的单 node 池或降低 vcpus；池不够时 preflight 会 fail-fast。
+CPU 预算提示：每 VM 恰好 `vcpus` 个 CPU（无 helper 附加），池可以跨 NUMA
+node。本机 node2 = 38-107、node3 = 108-181：`--cpu-start 38 --cpu-step 1`
+（vcpus=2）可连续供 72 个 VM，48 并发用 38..133 即可。池不够时 preflight
+会 fail-fast。
 
 ## 转换是如何执行的（`bwx convert`）
 

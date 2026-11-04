@@ -139,46 +139,57 @@ class PlacementGenerationTest(unittest.TestCase):
         nodes = node_ids()
         if not nodes:
             self.skipTest('no NUMA nodes')
-        # Pick a node whose first cpu makes a usable start.
         return nodes[0]
 
     def test_start_step_sequence(self):
-        """cpus are start + i*step, split into per-VM chunks of vcpus+1.
+        """cpus are start + i*step, split into per-VM chunks of vcpus.
 
-        step=2 with vcpus=1: the pool is start, start+2, start+4, start+6;
-        chunks of (vcpus+1)=2 give VM0=[start, start+2], VM1=[start+4, start+6].
-        (step=1 only works on hosts whose adjacent cpu numbers are distinct
-        cores; on SMT hosts a larger step skips the siblings.)
+        step=2 with vcpus=1: the pool is start, start+2; two VMs of one
+        vCPU each get [start] and [start+2]. (step=1 would pack SMT
+        siblings into one VM -- allowed, a density choice.)
         """
         from bwx.placement import node_cpus
         node = self._node()
         start = min(node_cpus(node))
-        # cpus = start, start+2, start+4, ... -> chunks of 2: [0,2],[4,6]
-        placements = placements_from_start_step(start, 2, node, 1, 2)
+        placements = placements_from_start_step(start, 2, 1, 2)
+        self.assertEqual([p.cpus for p in placements],
+                         [[start], [start + 2]])
+
+    def test_start_step_vcpu_chunks(self):
+        """vcpus=2: each VM consumes exactly 2 cpus from the sequence."""
+        from bwx.placement import node_cpus, select_cores
+        node = self._node()
+        start = min(select_cores(node_cpus(node), smt=True))
+        placements = placements_from_start_step(start, 2, 2, 2)
         self.assertEqual([p.cpus for p in placements],
                          [[start, start + 2], [start + 4, start + 6]])
 
     def test_start_step_bad_step_rejected(self):
-        node = self._node()
-        from bwx.placement import node_cpus
-        start = min(node_cpus(node))
         with self.assertRaises(Exception):
-            placements_from_start_step(start, 0, node, 1, 2)
+            placements_from_start_step(38, 0, 1, 2)
+
+    def test_start_step_unknown_start_rejected(self):
+        with self.assertRaises(Exception):
+            placements_from_start_step(999999, 1, 1, 1)
 
     def test_pool_too_small_rejected(self):
-        node = self._node()
         with self.assertRaises(Exception):
-            placements_from_pool([1, 2], node, 2, 2)
+            placements_from_pool([1, 2], 2, 2)
 
-    def test_pool_off_node_rejected(self):
-        node = self._node()
-        from bwx.placement import node_ids, node_cpus, select_cores
-        other = [n for n in node_ids() if n != node]
-        if not other:
-            self.skipTest('single node host')
-        cores_here = select_cores(node_cpus(other[0]), smt=True)[:6]
+    def test_pool_unknown_cpu_rejected(self):
         with self.assertRaises(Exception):
-            placements_from_pool(cores_here, node, 2, 2)
+            placements_from_pool([999999, 38, 40, 42], 2, 2)
+
+    def test_pool_may_cross_nodes(self):
+        """A pool spanning NUMA nodes splits into cross-node placements."""
+        from bwx.placement import node_ids, node_cpus
+        nodes = node_ids()
+        if len(nodes) < 2:
+            self.skipTest('single node host')
+        pool = [min(node_cpus(nodes[0])), min(node_cpus(nodes[1]))]
+        placements = placements_from_pool(pool, 1, 2)
+        self.assertEqual([p.cpus for p in placements], [[pool[0]], [pool[1]]])
+        self.assertNotEqual(placements[0].node, placements[1].node)
 
 
 if __name__ == '__main__':
