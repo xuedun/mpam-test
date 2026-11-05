@@ -147,7 +147,8 @@ def _stats(cpu, bw, window):
         if points:
             values = [v for _, v in points]
             rows.append({'scope': 'pool busy%', 'mean': _mean(values),
-                         'peak': max(values), 'frames': len(values)})
+                         'peak': round(max(values), 2),
+                         'frames': len(values)})
     if bw:
         for key in sorted(bw['series']):
             if key == 'all':
@@ -161,7 +162,7 @@ def _stats(cpu, bw, window):
                 totals = [rd + wr for _, rd, wr in points]
                 rows.append({'scope': '%s GB/s' % label,
                              'mean': _mean(totals),
-                             'peak': max(totals),
+                             'peak': round(max(totals), 2),
                              'frames': len(points)})
     return rows
 
