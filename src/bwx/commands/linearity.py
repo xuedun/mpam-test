@@ -118,7 +118,16 @@ def add_arguments(parser):
     parser.add_argument('--case-timeout', type=float)
     parser.add_argument('--boot-timeout', type=float)
     parser.add_argument('--action-timeout', type=float)
-    parser.add_argument('--bandwidth-interval', type=float)
+    parser.add_argument('--sample-interval', '--bandwidth-interval',
+                        dest='sample_interval', type=float,
+                        help='sampling interval seconds for the ddrc '
+                             'bandwidth and cpu busy%% collectors')
+    parser.add_argument('--bandwidth', choices=('on', 'off'), default=None,
+                        help='ddrc bandwidth capture per group '
+                             '(default: config bandwidth_enabled)')
+    parser.add_argument('--cpu-stats', choices=('on', 'off'), default=None,
+                        help='per-CPU busy%% series per group '
+                             '(default: config cpu_stats_enabled)')
     parser.add_argument('--no-tools-disk', action='store_true')
     parser.add_argument('--discard-work', action='store_true',
                         help='drop per-VM work dirs after extraction '
@@ -341,10 +350,14 @@ def _replay_cmd(args, group, level, out_dir):
                        ('case_timeout', '--case-timeout'),
                        ('boot_timeout', '--boot-timeout'),
                        ('action_timeout', '--action-timeout'),
-                       ('bandwidth_interval', '--bandwidth-interval')):
+                       ('sample_interval', '--sample-interval')):
         value = getattr(args, attr, None)
         if value is not None:
             cmd += [flag, str(value)]
+    for attr in ('bandwidth', 'cpu_stats'):
+        value = getattr(args, attr, None)
+        if value is not None:
+            cmd += ['--%s' % attr.replace('_', '-'), value]
     if args.no_tools_disk:
         cmd.append('--no-tools-disk')
     if args.discard_work:

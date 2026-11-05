@@ -192,6 +192,30 @@ def attach_bandwidth(context, collector, records, placements, epoch):
     return records
 
 
+def attach_cpu(records, cpu_series, epoch):
+    """Per-record pool-CPU stats from a CpuCollector's 'pool' series.
+
+    Same windowing as attach_bandwidth (boot excluded): what the VM pool's
+    busy% was while *this* VM was executing its trajectory.
+    """
+    if not cpu_series:
+        return records
+    rows = cpu_series.get('pool') or []
+    for record in records:
+        window = _active_window(record, epoch)
+        stat = None
+        if window:
+            points = [value for t, value in rows if window[0] <= t <= window[1]]
+            if points:
+                stat = {'samples': len(points),
+                        'mean_pct': round(sum(points) / len(points), 2),
+                        'peak_pct': max(points)}
+        record['cpu_util'] = {'available': stat is not None,
+                              'window_s': list(window) if window else None,
+                              'pool_pct': stat}
+    return records
+
+
 def _active_window(record, epoch):
     """[t_start, t_end] in collector-relative seconds."""
     launch = record.get('t_launch_wall')

@@ -95,9 +95,23 @@ sudo ./bwx replay --case-file cases.txt --concurrency 4 --fill --cpu-start 38 --
 
 `--vcpus/--mem-mib`（VM 规格）、`--numa-node`（自动分配路径的 node）、
 `--case-timeout/--boot-timeout/--action-timeout`（三级预算）、`--wait on/off`
-（轨迹延迟重放）、`--console off/markers/full`（串口档位）、
-`--bandwidth-interval`（ddrc 采样间隔）、`--keep-disks`（保留 scratch 盘）、
-`--out DIR`、`--dry-run`（只打印计划）。
+（轨迹延迟重放）、`--console off/markers/full`（串口档位）、`--keep-disks`（保留
+scratch 盘）、`--out DIR`、`--dry-run`（只打印计划）。
+
+**资源采集**（两个采集器共用 `--sample-interval`，默认 1s；各自
+`--bandwidth on|off` / `--cpu-stats on|off` 控制，默认看 config 的
+`bandwidth_enabled` / `cpu_stats_enabled`）：
+
+- **内存带宽**（`perf` DDRC uncore PMU）：per-node 读写 GB/s 序列
+  （`bandwidth-series.json`），并按每 VM 的 CASE_START→CASE_DONE 窗口把
+  peak/mean 贴进 record 的 `bandwidth` 字段
+- **CPU 利用率**（`/proc/stat` 差分，纯用户态）：`cpu-series.json` 含
+  `pool`（本组绑核 CPU 并集的 busy%——VM 池压力，不受干扰）、每 node 全量
+  （node 比 pool 高 = 未绑核 CPU 上有别人的负载，哨兵）、`total`；record 里
+  贴 `cpu_util.pool_pct`（窗口统计）
+- **per-VM CPU**：record 的 `host_cpu_s` / `host_vcpu_util`（VMM 进程
+  utime+stime 差分，并发不互相污染；旧的 host_user_s 在并发下不可比）
+- 顺带读 `/proc/pressure/{cpu,memory}` PSI（本机内核未开 PSI 时优雅跳过）
 
 退出码：全部真实 VM completed/budget_exhausted → 0，否则 1。
 

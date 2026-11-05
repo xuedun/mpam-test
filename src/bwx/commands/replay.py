@@ -38,6 +38,7 @@ from pathlib import Path
 
 from .. import bandwidth as bw
 from .. import cases as cases_mod
+from .. import cpu as cpu_mod
 from .. import driver
 from .. import placement as placement_mod
 from .. import vm as vm_mod
@@ -98,8 +99,16 @@ def add_arguments(parser):
     parser.add_argument('--case-timeout', type=float)
     parser.add_argument('--boot-timeout', type=float)
     parser.add_argument('--action-timeout', type=float, default=600)
-    parser.add_argument('--bandwidth-interval', type=float, default=1.0,
-                        help='ddrc sampling interval seconds (default 1)')
+    parser.add_argument('--bandwidth', choices=('on', 'off'), default=None,
+                        help='ddrc bandwidth capture (default: config '
+                             'bandwidth_enabled)')
+    parser.add_argument('--cpu-stats', choices=('on', 'off'), default=None,
+                        help='per-CPU busy%% series (/proc/stat: pool, every '
+                             'node, PSI; default: config cpu_stats_enabled)')
+    parser.add_argument('--sample-interval', '--bandwidth-interval',
+                        dest='sample_interval', type=float, default=1.0,
+                        help='sampling interval seconds for BOTH the ddrc '
+                             'bandwidth and cpu busy%% collectors (default 1)')
     parser.add_argument('--no-tools-disk', action='store_true')
     parser.add_argument('--keep-disks', action='store_true',
                         help='keep rootfs.ext4/payload.ext4 for post-mortem '
@@ -155,29 +164,44 @@ def run(args):
         context.require_tools_disk()
 
     runner = _Runner(context, args, plan, resolved, out)
-    collector, epoch = None, time.time()
-    topology = context.require_bandwidth()
+    bw_on = _resolve_flag(args.bandwidth, config.bandwidth_enabled)
+    cpu_on = _resolve_flag(args.cpu_stats, config.cpu_stats_enabled)
+    collector, cpu_collector, epoch = None, None, time.time()
+    topology = context.require_bandwidth() if bw_on else None
     try:
-        if topology is not None:
+        if bw_on and topology is not None:
             collector = bw.BandwidthCollector(topology, out,
-                                              interval=args.bandwidth_interval,
+                                              interval=args.sample_interval,
                                               label='replay')
             if collector.start():
                 epoch = time.time()
             else:
                 collector = None
                 print('warning: ddrc collector did not start; no bandwidth data')
+        elif bw_on:
+            print('warning: ddrc PMUs not available; no bandwidth data')
+        if cpu_on:
+            pool_cpus = {cpu for item in plan for cpu in item['placement'].cpus}
+            cpu_collector = cpu_mod.CpuCollector(out,
+                                                 interval=args.sample_interval,
+                                                 pool_cpus=pool_cpus,
+                                                 label='replay')
+            cpu_collector.start()
         if args.fill:
             runner.run_fill()
         else:
             runner.run_normal()
     finally:
+        records = runner.real_records + runner.filler_records
         if collector is not None:
             collector.stop()
             by_slot = {item['slot']: item['placement'] for item in plan}
-            records = runner.real_records + runner.filler_records
             placements = [by_slot.get(r.get('slot')) for r in records]
             driver.attach_bandwidth(context, collector, records, placements, epoch)
+        if cpu_collector is not None:
+            cpu_collector.stop()
+            driver.attach_cpu(records, cpu_collector.read(),
+                              cpu_collector.epoch)
 
     summary = runner.summary()
     write_json(out / 'result.json', summary)
@@ -227,6 +251,15 @@ def _placements(config, args, count):
                                             mem_mib=config.mem_mib)
         return allocator.take_many(count)
     return placement_mod.placements_from_pool(pool, vcpus, count)
+
+
+def _resolve_flag(cli_value, config_value):
+    """CLI on/off beats the config default; unset falls back to config."""
+    if cli_value == 'on':
+        return True
+    if cli_value == 'off':
+        return False
+    return bool(config_value)
 
 
 def _plan_records(expanded, placements):

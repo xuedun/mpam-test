@@ -51,6 +51,33 @@ from .util import (Error, copy_sparse, read_json, run, sha256_file, srun,
 
 # Firecracker names its vCPU threads `fc_vcpu <n>`.
 _VCPU_RE = re.compile(r'vcpu\D*(\d+)$')
+
+
+def _proc_stat_jiffies(pid):
+    """utime+stime (jiffies) of one process from /proc/<pid>/stat.
+
+    Field order after the comm field: state, ppid, ..., utime, stime -- so
+    with `pid (comm) ` split off, utime/stime are split-indices 11/12.
+    """
+    try:
+        text = Path('/proc/%d/stat' % pid).read_text()
+        fields = text.rsplit(')', 1)[1].split()
+        return int(fields[11]) + int(fields[12])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _jiffies_delta_seconds(samples):
+    """First-to-last vmm_cpu_jiffies delta as CPU-seconds (None if unsampled)."""
+    values = [s.get('vmm_cpu_jiffies') for s in samples
+              if isinstance(s.get('vmm_cpu_jiffies'), int)]
+    if len(values) < 2:
+        return None
+    try:
+        hz = os.sysconf('SC_CLK_TCK')
+    except (ValueError, OSError):
+        hz = 100
+    return max(0, values[-1] - values[0]) / float(hz)
 _GUEST_RAM_FRACTION = 0.8
 
 
@@ -215,6 +242,9 @@ class VmRun:
         pins, samples = {}, []
 
         launch = time.monotonic()
+        # Wall-clock anchors for collector-window attribution (bandwidth/CPU):
+        # set here so every caller gets them, not just the driver wrapper.
+        t_launch_wall = time.time()
         host_times = {}
         console_handle = None
         try:
@@ -246,6 +276,8 @@ class VmRun:
         # Serial-only fields.
         result.fields.update({
             'vmm_exit_code': vmm_exit, 'vmm_wall_s': round(wall_s, 3),
+            't_launch_wall': t_launch_wall,
+            't_end_wall': time.time(),
             'host_user_s': round(usage_after.ru_utime - usage_before.ru_utime, 3),
             'host_system_s': round(usage_after.ru_stime - usage_before.ru_stime, 3),
             'placement': self.placement.as_dict(),
@@ -258,6 +290,16 @@ class VmRun:
             'console': filter_.stats(),
             'samples': len(samples),
         })
+
+        # Per-VM CPU time from the VMM's own utime+stime (immune to the
+        # rusage-CHILDREN pollution that makes host_user_s/host_system_s
+        # incomparable across concurrent VMs). util = CPU-seconds per
+        # wall-second over vcpus+helper threads.
+        cpu_s = _jiffies_delta_seconds(samples)
+        if cpu_s is not None:
+            result.fields['host_cpu_s'] = round(cpu_s, 3)
+            if wall_s > 0:
+                result.fields['host_vcpu_util'] = round(cpu_s / wall_s, 3)
 
         # Extract the authoritative on-disk summary from the payload disk.
         extracted = payload_mod.extract_results(self.payload_disk, self.target / 'guest')
@@ -445,7 +487,7 @@ class VmRun:
         return count >= self.config.vcpus
 
     def _sample(self, elapsed):
-        """One /proc sample: RSS, guest-RAM node distribution and memory policy."""
+        """One /proc sample: RSS, VMM cpu time, guest-RAM nodes, policy."""
         pid = self.process.pid if self.process else None
         if pid is None:
             return {}
@@ -454,6 +496,9 @@ class VmRun:
             sample['rss_bytes'] = int((Path('/proc/%d/statm' % pid)).read_text().split()[1]) * 4096
         except (OSError, ValueError, IndexError):
             pass
+        jiffies = _proc_stat_jiffies(pid)
+        if jiffies is not None:
+            sample['vmm_cpu_jiffies'] = jiffies
         ram = self._guest_ram(pid)
         if ram:
             sample.update(ram)

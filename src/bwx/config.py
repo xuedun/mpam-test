@@ -18,6 +18,7 @@ DEFAULTS = {
     'kernel': '/var/lib/aenv/deps/kernel/vmlinux-6.1.175/vmlinux.bin',
     'ddrc_scale_bytes': 32,
     'bandwidth_enabled': True,
+    'cpu_stats_enabled': True,
     'vcpus': 2,
     'mem_mib': 4096,
     'numa_node': 0,
@@ -28,7 +29,7 @@ DEFAULTS = {
 }
 
 _ENV_PREFIX = 'BWX_'
-_BOOL_KEYS = {'bandwidth_enabled', 'console_verify'}
+_BOOL_KEYS = {'bandwidth_enabled', 'cpu_stats_enabled', 'console_verify'}
 _INT_KEYS = {'ddrc_scale_bytes', 'vcpus', 'mem_mib', 'numa_node'}
 _FLOAT_KEYS = {'case_timeout', 'boot_timeout'}
 
