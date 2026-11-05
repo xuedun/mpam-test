@@ -8,6 +8,7 @@ Commands map 1:1 onto the experiment phases in docs/EXPERIMENT-PLAN.md:
     linearity  concurrency-scaling sweep, CSV summary per case
     case-list  extract the replayable case ids from a case directory
     slice      cut levels (columns) and cases (rows) out of the CSVs
+    curves     merged cpu-utilization / memory-bandwidth series + averages
     list       show converted cases (image bytes, steps, sha)
     cleanup    remove scratch dirs left by an interrupted run
 """
@@ -30,11 +31,11 @@ def build_parser():
     sub = parser.add_subparsers(dest='command', required=True)
 
     from . import config as config_mod
-    from .commands import (case_list, cleanup, convert, doctor, linearity,
-                           list_, replay, slice)
+    from .commands import (case_list, cleanup, convert, curves, doctor,
+                           linearity, list_, replay, slice)
 
     for module in (doctor, convert, replay, linearity, case_list, slice,
-                   list_, cleanup):
+                   curves, list_, cleanup):
         module_parser = sub.add_parser(module.COMMAND, help=module.HELP,
                                        description=module.HELP,
                                        formatter_class=argparse.RawDescriptionHelpFormatter)

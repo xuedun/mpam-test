@@ -193,6 +193,24 @@ sudo ./bwx slice --sweep sub.csv --levels 8:48:8                            # �
 直接一个 CSV 文件（比如 `--save` 的产物可以再切）。`--metric
 seconds|ratio` 选耗时矩阵或倍数矩阵；默认打印对齐表格，`--save` 写的 CSV
 与 `linearity.csv` 同构。
+
+### 资源曲线与均值（`bwx curves`）
+
+把一次运行（或 linearity 组目录）的 `cpu-series.json` + `bandwidth-series.json`
+合成**统一时间轴**的曲线与全局均值：
+
+```bash
+sudo ./bwx curves --sweep logs/replay/run48     --save-merged curves.csv --save-stats stats.csv
+sudo ./bwx curves --sweep logs/linearity/run1          # sweep 根：每档聚合表
+```
+
+- 曲线：`--save-merged` 写一个按秒分桶的 CSV（t 相对首样本，pool busy% 与
+  各 node DDRC 读写 GB/s 对齐到同一网格，空桶留白）；终端同步打印 sparkline
+- 均值：**active 窗口**（VM 实际执行期间，串行 boot/prepare 已剔除）的
+  mean/peak；`--full-window` 强制全序列；无墙钟锚点的旧数据自动退化为全序列
+- sweep 根模式：逐档聚合所有组的 pool busy / 各 node 带宽 mean/peak，是
+  "耗时 ratio（linearity_ratio.csv）对照资源饱和度"的直接表
+- 旧数据的 series 缺 `epoch_wall` 时按 t=0 对齐（真实偏移 < 采样粒度）并警告
 透传参数：`--cpu-start/--cpu-step`、`--vcpus/--mem-mib/--numa-node`、
 `--case-timeout/--boot-timeout/--action-timeout/--bandwidth-interval`、
 `--no-tools-disk`、`--discard-work`、`--group-timeout`（组级兜底超时，默认

@@ -174,7 +174,8 @@ def attach_bandwidth(context, collector, records, placements, epoch):
             record['bandwidth'] = {'available': False}
         return records
     write_json(context.out_dir / 'bandwidth-series.json',
-               {str(k): v for k, v in series.items()})
+               {'epoch_wall': epoch,
+                'series': {str(k): v for k, v in series.items()}})
     for record, placement in zip(records, placements):
         node = placement.node if placement is not None else None
         window = _active_window(record, epoch)

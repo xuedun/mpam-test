@@ -183,6 +183,7 @@ class CpuCollector:
                     psi[source].append([t, frame_psi[source]])
         self.out_dir.mkdir(parents=True, exist_ok=True)
         write_json(self.series_path, {
+            'epoch_wall': self.epoch,
             'interval_s': self.interval,
             'pool_cpus': self.pool,
             'series': series,
