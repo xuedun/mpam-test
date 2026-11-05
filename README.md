@@ -161,6 +161,21 @@ sudo ./bwx linearity --case-file cases.txt --levels 1,2,4:8,24:48:8 \
 | `n<level>/seed.txt`、`plan.txt` | 该档的 shuffle seed 与分组计划（可复现） |
 
 只重算 CSV 不跑 VM：`sudo ./bwx linearity --out <dir> --summarize-only`。
+
+### 结果切片（`bwx slice`）
+
+从 sweep 的结果矩阵中切子集，`--levels` 用与 sweep 相同的含端点切片语法选
+**列**（不存在的档警告并跳过），`--cases`/`--top N` 选**行**（top = 最高档值
+最大的 N 个 case）：
+
+```bash
+sudo ./bwx slice --out logs/linearity/run1 --levels 1,8:48:8 --top 10        # 最慢 10 个
+sudo ./bwx slice --out logs/linearity/run1 --levels 4:16:4 --cases a,b --metric ratio
+sudo ./bwx slice --out logs/linearity/run1 --levels 8:48:8 --save sub.csv    # 子矩阵落盘
+```
+
+`--metric seconds|ratio` 选耗时矩阵或倍数矩阵；默认打印对齐表格，`--save`
+写的 CSV 与 `linearity.csv` 同构。
 透传参数：`--cpu-start/--cpu-step`、`--vcpus/--mem-mib/--numa-node`、
 `--case-timeout/--boot-timeout/--action-timeout/--bandwidth-interval`、
 `--no-tools-disk`、`--discard-work`、`--group-timeout`（组级兜底超时，默认
