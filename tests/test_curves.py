@@ -172,6 +172,14 @@ class RunTest(unittest.TestCase):
         self.assertIn('pool_busy_mean', text)
         self.assertIn('80.0', text)
 
+    def test_sweep_root_rejects_save_merged(self):
+        (self.base / 'run.json').write_text(json.dumps({'cases': [], 'levels': []}))
+        import io
+        out = io.StringIO()
+        with redirect_stdout(out):
+            with self.assertRaises(Exception):
+                run(self._args(sweep=self.base, save_merged=self.base / 'm.csv'))
+
     def test_rejects_unknown_dir(self):
         import io
         out = io.StringIO()

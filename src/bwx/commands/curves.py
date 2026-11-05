@@ -277,6 +277,10 @@ def _print_sparklines(cpu, bw, window):
 
 # ------------------------------------------------------------- sweep root
 def _run_sweep_root(root, args):
+    if args.save_merged is not None:
+        raise Error('--save-merged applies to a single run/group dir '
+                    '(--sweep n<level>/g<idx> or a replay out), not a '
+                    'sweep root; the root prints/aggregates per level')
     rows = []
     for level_dir in sorted((d for d in root.glob('n*') if d.is_dir()),
                             key=lambda d: int(d.name[1:])):
