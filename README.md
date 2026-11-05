@@ -169,13 +169,16 @@ sudo ./bwx linearity --case-file cases.txt --levels 1,2,4:8,24:48:8 \
 最大的 N 个 case）：
 
 ```bash
-sudo ./bwx slice --out logs/linearity/run1 --levels 1,8:48:8 --top 10        # 最慢 10 个
-sudo ./bwx slice --out logs/linearity/run1 --levels 4:16:4 --cases a,b --metric ratio
-sudo ./bwx slice --out logs/linearity/run1 --levels 8:48:8 --save sub.csv    # 子矩阵落盘
+sudo ./bwx slice --sweep logs/linearity/run1 --levels 1,8:48:8 --top 10     # 最慢 10 个
+sudo ./bwx slice --sweep logs/linearity/run1 --levels 4:16:4 --cases a,b --metric ratio
+sudo ./bwx slice --sweep logs/linearity/run1 --levels 8:48:8 --save sub.csv # 子矩阵落盘
+sudo ./bwx slice --sweep sub.csv --levels 8:48:8                            # 再切已存的子矩阵
 ```
 
-`--metric seconds|ratio` 选耗时矩阵或倍数矩阵；默认打印对齐表格，`--save`
-写的 CSV 与 `linearity.csv` 同构。
+`--sweep` 是**输入**：sweep 目录（按 `--metric` 读其中的 linearity*.csv）或
+直接一个 CSV 文件（比如 `--save` 的产物可以再切）。`--metric
+seconds|ratio` 选耗时矩阵或倍数矩阵；默认打印对齐表格，`--save` 写的 CSV
+与 `linearity.csv` 同构。
 透传参数：`--cpu-start/--cpu-step`、`--vcpus/--mem-mib/--numa-node`、
 `--case-timeout/--boot-timeout/--action-timeout/--bandwidth-interval`、
 `--no-tools-disk`、`--discard-work`、`--group-timeout`（组级兜底超时，默认

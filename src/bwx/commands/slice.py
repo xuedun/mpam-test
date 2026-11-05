@@ -31,8 +31,10 @@ _METRICS = ('seconds', 'ratio')
 
 
 def add_arguments(parser):
-    parser.add_argument('--out', type=Path, metavar='DIR', required=True,
-                        help='sweep dir (the --out given to bwx linearity)')
+    parser.add_argument('--sweep', type=Path, metavar='PATH', required=True,
+                        help='INPUT: a sweep dir (reads its linearity*.csv, '
+                             '--metric picks which) or a csv file directly '
+                             '(e.g. one written by --save)')
     parser.add_argument('--levels', metavar='EXPR',
                         help='columns to keep: integers and inclusive '
                              'slices start:stop[:step] mix freely '
@@ -54,11 +56,7 @@ def add_arguments(parser):
 def run(args):
     if args.cases is not None and args.top is not None:
         raise Error('--cases and --top are mutually exclusive')
-    path = args.out / ('linearity.csv' if args.metric == 'seconds'
-                       else 'linearity_ratio.csv')
-    if not path.is_file():
-        raise Error('%s not found (run `bwx linearity --out %s '
-                    '--summarize-only` first?)' % (path, args.out))
+    path = _source_csv(args.sweep, args.metric)
 
     rows = _read_matrix(path)
     columns = _select_columns(rows, args.levels)
@@ -74,6 +72,21 @@ def run(args):
         print('wrote %s (%d row(s) x %d level(s))'
               % (args.save, len(rows), len(columns)))
     return 0
+
+
+def _source_csv(source, metric):
+    """--sweep accepts a sweep directory or a csv file path directly."""
+    if source.is_file():
+        return source
+    if source.is_dir():
+        path = source / ('linearity.csv' if metric == 'seconds'
+                         else 'linearity_ratio.csv')
+        if path.is_file():
+            return path
+        raise Error('%s not found (run `bwx linearity --out %s '
+                    '--summarize-only` first?)' % (path, source))
+    raise Error('%s does not exist (want a sweep dir or a csv file)'
+                % source)
 
 
 def _read_matrix(path):

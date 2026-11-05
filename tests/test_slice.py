@@ -7,7 +7,7 @@ from pathlib import Path
 
 from bwx.commands.slice import (_available_levels, _matrix_row,
                                 _read_matrix, _select_columns, _select_rows,
-                                run)
+                                _source_csv, run)
 
 
 def _row(case, levels):
@@ -99,7 +99,7 @@ class RunTest(unittest.TestCase):
             encoding='utf-8-sig')
 
     def _args(self, **kwargs):
-        base = dict(out=self.base, levels=None, cases=None, top=None,
+        base = dict(sweep=self.base, levels=None, cases=None, top=None,
                     metric='seconds', save=None)
         base.update(kwargs)
         return argparse.Namespace(**base)
@@ -131,7 +131,25 @@ class RunTest(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             with self.assertRaises(Exception):
-                run(self._args(out=self.base / 'nowhere'))
+                run(self._args(sweep=self.base / 'nowhere'))
+
+    def test_sweep_can_be_a_csv_file(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            args = self._args(sweep=self.base / 'linearity.csv',
+                              levels='1,8')
+            self.assertEqual(run(args), 0)
+        self.assertIn('n8', out.getvalue())
+
+    def test_missing_source_rejected(self):
+        with self.assertRaises(Exception):
+            _source_csv(self.base / 'nope', 'seconds')
+
+    def test_dir_missing_metric_csv_rejected(self):
+        empty = self.base / 'empty-sweep'
+        empty.mkdir()
+        with self.assertRaises(Exception):
+            _source_csv(empty, 'ratio')
 
     def test_cases_and_top_are_exclusive(self):
         with self.assertRaises(Exception):
