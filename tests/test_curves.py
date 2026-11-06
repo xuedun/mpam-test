@@ -130,7 +130,7 @@ class RunTest(unittest.TestCase):
 
     def _args(self, **kwargs):
         base = dict(sweep=self.base, grid=None, full_window=False,
-                    save_merged=None, save_stats=None)
+                    save_merged=None, save_stats=None, plot=None)
         base.update(kwargs)
         return argparse.Namespace(**base)
 
@@ -171,6 +171,38 @@ class RunTest(unittest.TestCase):
         self.assertIn('level', text)
         self.assertIn('pool_busy_mean', text)
         self.assertIn('80.0', text)
+
+    def test_plot_group_renders_png(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest('matplotlib not installed')
+        _write_group(self.base,
+                     cpu={'epoch': 0.0,
+                          'series': {'pool': [[1, 40.0], [2, 60.0]]}},
+                     bw={'epoch': 0.0, 'series': {'2': [[1, 3.0, 1.0]]}},
+                     result={'real': [{'t_launch_wall': 1.0,
+                                       't_end_wall': 2.0}]})
+        target = self.base / 'plot.png'
+        import io
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(run(self._args(plot=target)), 0)
+        self.assertTrue(target.is_file())
+        self.assertGreater(target.stat().st_size, 1000)
+        self.assertIn('wrote %s' % target, out.getvalue())
+
+    def test_plot_without_samples_errors(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest('matplotlib not installed')
+        _write_group(self.base, cpu={'epoch': 0.0, 'series': {'pool': []}})
+        import io
+        out = io.StringIO()
+        with redirect_stdout(out):
+            with self.assertRaises(Exception):
+                run(self._args(plot=self.base / 'plot.png'))
 
     def test_sweep_root_rejects_save_merged(self):
         (self.base / 'run.json').write_text(json.dumps({'cases': [], 'levels': []}))

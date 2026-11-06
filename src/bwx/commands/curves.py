@@ -47,6 +47,9 @@ def add_arguments(parser):
                              'mode only)')
     parser.add_argument('--save-stats', type=Path, metavar='FILE',
                         help='write the stats table as CSV')
+    parser.add_argument('--plot', type=Path, metavar='FILE',
+                        help='render a matplotlib figure to FILE (.png/.svg/'
+                             '.pdf; needs matplotlib installed)')
 
 
 def run(args):
@@ -82,6 +85,8 @@ def _run_group(group_dir, args):
               % (args.save_merged, len(rows), grid))
     if args.save_stats is not None:
         write_csv(args.save_stats, stats, list(stats[0]) if stats else [])
+    if args.plot is not None:
+        _plot_group(group_dir, cpu, bw, window, args.plot)
     return 0
 
 
@@ -327,4 +332,116 @@ def _run_sweep_root(root, args):
     if args.save_stats is not None:
         write_csv(args.save_stats, rows, columns)
         print('wrote %s (%d level(s))' % (args.save_stats, len(rows)))
+    if args.plot is not None:
+        _plot_sweep(root, rows, args.plot)
     return 0
+
+
+# ------------------------------------------------------------- matplotlib
+def _require_matplotlib():
+    """Lazy, optional import: plotting works only when matplotlib exists."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')          # headless servers
+        import matplotlib.pyplot as plt
+        return plt
+    except ImportError:
+        raise Error('--plot needs matplotlib: pip3 install matplotlib')
+
+
+def _plot_group(group_dir, cpu, bw, window, target):
+    """One figure: pool busy% (left axis) vs per-node ddrc GB/s (right)."""
+    plt = _require_matplotlib()
+    left_series, right_series = [], []
+    if cpu:
+        epoch = cpu['epoch'] or 0.0
+        points = [(t + epoch, value) for t, value in
+                  cpu['series'].get('pool') or []]
+        if points:
+            left_series.append(('pool busy %', points))
+    if bw:
+        epoch = bw['epoch'] or 0.0
+        for key in sorted(bw['series']):
+            points = [(t + epoch, rd + wr) for t, rd, wr in
+                      bw['series'].get(key) or []]
+            if points:
+                label = ('all' if key == 'all' else 'node%s' % key)
+                right_series.append((label, points))
+    if not left_series and not right_series:
+        raise Error('nothing to plot: no pool busy or bandwidth samples')
+    t0 = min(point[0] for _, points in left_series + right_series
+             for point in points)
+
+    fig, ax1 = plt.subplots(figsize=(12, 5))
+    ax2 = ax1.twinx()
+    palette = {'node0': '#ff7f0e', 'node1': '#9467bd', 'node2': '#1f77b4',
+               'node3': '#2ca02c', 'all': '#7f7f7f'}
+    cycle = ['#17becf', '#bcbd22', '#8c564b', '#e377c2']
+    lines = []
+    for label, points in left_series:
+        x = [t - t0 for t, _ in points]
+        line, = ax1.plot(x, [v for _, v in points], color='#d62728',
+                         lw=1.3, label=label)
+        lines.append(line)
+    for index, (label, points) in enumerate(right_series):
+        x = [t - t0 for t, _ in points]
+        color = palette.get(label, cycle[index % len(cycle)])
+        line, = ax2.plot(x, [v for _, v in points], color=color, lw=1.1,
+                         label='%s rd+wr GB/s' % label, alpha=0.9)
+        lines.append(line)
+
+    ax1.set_xlabel('t (s, relative to first sample)')
+    if left_series:
+        ax1.set_ylabel('pool busy %')
+        ax1.set_ylim(0, 100)
+    ax2.set_ylabel('memory bandwidth (GB/s)')
+    ax1.grid(alpha=0.3)
+    if window:
+        ax1.axvspan(window[0] - t0, window[1] - t0, color='0.5', alpha=0.08)
+    title = str(group_dir)
+    if window:
+        title += '\nactive window %.1fs (boot/prepare shaded)' \
+                 % (window[1] - window[0])
+    ax1.set_title(title, fontsize=10)
+    ax1.legend(lines, [line.get_label() for line in lines],
+               loc='upper right', fontsize=9)
+    fig.tight_layout()
+    fig.savefig(str(target), dpi=150)
+    plt.close(fig)
+    print('wrote %s' % target)
+
+
+def _plot_sweep(root, rows, target):
+    """Per-level figure: pool busy (left) and node bandwidth (right)."""
+    plt = _require_matplotlib()
+    levels = [row['level'] for row in rows]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+    if any('pool_busy_mean' in row for row in rows):
+        mean = [row.get('pool_busy_mean') for row in rows]
+        peak = [row.get('pool_busy_peak') for row in rows]
+        ax1.plot(levels, mean, 'o-', color='#d62728', label='mean')
+        ax1.plot(levels, peak, '^--', color='#d62728', alpha=0.45,
+                 label='peak')
+        ax1.set_ylabel('pool busy %')
+        ax1.set_ylim(0, 100)
+        ax1.legend(fontsize=9)
+    else:
+        ax1.text(0.5, 0.5, 'no cpu data', ha='center', va='center',
+                 transform=ax1.transAxes)
+    for key in sorted({column for row in rows for column in row
+                       if column.endswith('_mean')
+                       and column not in ('pool_busy_mean',)}):
+        values = [row.get(key) for row in rows]
+        ax2.plot(levels, values, 'o-', label=key.replace('_mean', ''))
+    ax2.set_ylabel('memory bandwidth mean (GB/s)')
+    ax2.grid(alpha=0.3)
+    ax2.legend(fontsize=9)
+    for axis in (ax1, ax2):
+        axis.set_xlabel('concurrency level')
+        axis.grid(alpha=0.3)
+    fig.suptitle('%s (per level, active window)' % root, fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
+    fig.savefig(str(target), dpi=150)
+    plt.close(fig)
+    print('wrote %s' % target)
